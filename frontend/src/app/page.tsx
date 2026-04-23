@@ -1,0 +1,560 @@
+"use client";
+
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { marked } from "marked";
+import DOMPurify from "dompurify";
+
+type Bbox = { x0: number; y0: number; x1: number; y1: number };
+type Annotation = {
+  kind: string;
+  color?: string | null;
+  text?: string | null;
+  contents?: string | null;
+  bbox?: Bbox | null;
+  page: number;
+};
+type ExtractedImage = {
+  page: number;
+  index: number;
+  ext: string;
+  width: number;
+  height: number;
+  bbox?: Bbox | null;
+  data_url: string;
+};
+type ExtractedTable = {
+  page: number;
+  rows: string[][];
+  confidence: number;
+  flagged: boolean;
+  note?: string | null;
+};
+type PageBlock = {
+  kind: string;
+  content: string;
+  html?: string | null;
+  table?: ExtractedTable | null;
+  image?: ExtractedImage | null;
+  annotation?: Annotation | null;
+  confidence: number;
+  flagged: boolean;
+  note?: string | null;
+};
+type Page = {
+  number: number;
+  width: number;
+  height: number;
+  blocks: PageBlock[];
+  plain_text: string;
+  used_ocr: boolean;
+};
+type ExtractionResult = {
+  filename: string;
+  page_count: number;
+  metadata: Record<string, string>;
+  pages: Page[];
+  images: ExtractedImage[];
+  tables: ExtractedTable[];
+  annotations: Annotation[];
+  engines_used: string[];
+  warnings: string[];
+  plain_text: string;
+  sha256: string;
+  overall_confidence: number;
+};
+type ExtractResponse = { result: ExtractionResult; raw_markdown: string };
+
+function resolveApiBase(): string {
+  const env = process.env.NEXT_PUBLIC_API_BASE;
+  if (env) return env.replace(/\/+$/, "");
+  if (typeof window === "undefined") return "";
+  const h = window.location.hostname;
+  if (h === "localhost" || h === "127.0.0.1" || h === "0.0.0.0") {
+    return "http://localhost:8000";
+  }
+  return "";
+}
+const API_BASE = resolveApiBase();
+
+export default function Home() {
+  const [file, setFile] = useState<File | null>(null);
+  const [filePreviewUrl, setFilePreviewUrl] = useState<string | null>(null);
+  const [dragOver, setDragOver] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [status, setStatus] = useState<string>("");
+  const [result, setResult] = useState<ExtractResponse | null>(null);
+  const [engaging, setEngaging] = useState<string | null>(null);
+  const [engagingLoading, setEngagingLoading] = useState(false);
+  const [engagingMeta, setEngagingMeta] = useState<{
+    provider: string;
+    model: string;
+  } | null>(null);
+  const [mode, setMode] = useState<"raw" | "engaging">("raw");
+  const [showOriginal, setShowOriginal] = useState(true);
+  const [zoom, setZoom] = useState(16);
+  const [search, setSearch] = useState("");
+  const [dark, setDark] = useState(false);
+  const outputRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const cls = document.documentElement.classList;
+    if (dark) cls.add("dark");
+    else cls.remove("dark");
+  }, [dark]);
+
+  const onFiles = useCallback((files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    const f = files[0];
+    if (!f.name.toLowerCase().endsWith(".pdf")) {
+      setStatus("Please select a .pdf file");
+      return;
+    }
+    setFile(f);
+    if (filePreviewUrl) URL.revokeObjectURL(filePreviewUrl);
+    setFilePreviewUrl(URL.createObjectURL(f));
+    setStatus(`Selected ${f.name} (${(f.size / 1024 / 1024).toFixed(2)} MB)`);
+    setResult(null);
+    setEngaging(null);
+    setEngagingMeta(null);
+    setMode("raw");
+  }, [filePreviewUrl]);
+
+  const extractNow = useCallback(async () => {
+    if (!file) return;
+    setUploading(true);
+    setStatus("Uploading and extracting…");
+    setResult(null);
+    setEngaging(null);
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      const r = await fetch(`${API_BASE}/extract`, {
+        method: "POST",
+        body: fd,
+      });
+      if (!r.ok) {
+        const txt = await r.text();
+        throw new Error(txt || `Extraction failed (${r.status})`);
+      }
+      const data = (await r.json()) as ExtractResponse;
+      setResult(data);
+      setStatus(
+        `Extracted ${data.result.page_count} page${
+          data.result.page_count === 1 ? "" : "s"
+        } using ${data.result.engines_used.join(" + ")}. ` +
+          `${data.result.tables.length} table(s), ${data.result.images.length} image(s), ${data.result.annotations.length} annotation(s).`
+      );
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setStatus(`Error: ${msg}`);
+    } finally {
+      setUploading(false);
+    }
+  }, [file]);
+
+  const toggleEngaging = useCallback(async () => {
+    if (!result) return;
+    if (mode === "engaging") {
+      setMode("raw");
+      return;
+    }
+    if (engaging) {
+      setMode("engaging");
+      return;
+    }
+    setEngagingLoading(true);
+    setStatus("Transforming to Engaging Mode…");
+    try {
+      const r = await fetch(`${API_BASE}/engaging`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ raw_markdown: result.raw_markdown }),
+      });
+      if (!r.ok) throw new Error(await r.text());
+      const data = (await r.json()) as {
+        engaging_markdown: string;
+        provider: string;
+        model: string;
+        sha256_input: string;
+      };
+      setEngaging(data.engaging_markdown);
+      setEngagingMeta({ provider: data.provider, model: data.model });
+      setMode("engaging");
+      setStatus(
+        `Engaging Mode rendered (provider: ${data.provider} / ${data.model}).`
+      );
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setStatus(`Engaging Mode error: ${msg}`);
+    } finally {
+      setEngagingLoading(false);
+    }
+  }, [result, mode, engaging]);
+
+  const currentMarkdown = useMemo(() => {
+    if (!result) return "";
+    return mode === "engaging" && engaging ? engaging : result.raw_markdown;
+  }, [result, mode, engaging]);
+
+  const renderedHtml = useMemo(() => {
+    if (!currentMarkdown) return "";
+    marked.setOptions({ breaks: false, gfm: true });
+    const rawHtml = marked.parse(currentMarkdown, { async: false }) as string;
+    let html = DOMPurify.sanitize(rawHtml, {
+      ADD_ATTR: ["target", "rel"],
+      ADD_TAGS: ["u"],
+    });
+    if (search.trim().length > 1) {
+      const s = search.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&");
+      const re = new RegExp(`(${s})`, "gi");
+      // Highlight only outside of tags
+      html = html.replace(
+        />([^<]+)</g,
+        (_, inner) => `>${inner.replace(re, "<mark class='search-hit'>$1</mark>")}<`
+      );
+    }
+    return html;
+  }, [currentMarkdown, search]);
+
+  const copyAll = useCallback(async () => {
+    if (!currentMarkdown) return;
+    try {
+      await navigator.clipboard.writeText(currentMarkdown);
+      setStatus("Copied to clipboard.");
+    } catch {
+      setStatus("Clipboard copy failed — select and copy manually.");
+    }
+  }, [currentMarkdown]);
+
+  const download = useCallback(
+    async (format: "md" | "html" | "txt") => {
+      if (!currentMarkdown || !result) return;
+      const base = result.result.filename.replace(/\.pdf$/i, "");
+      const r = await fetch(`${API_BASE}/download`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          content: currentMarkdown,
+          format,
+          filename: base,
+        }),
+      });
+      if (!r.ok) {
+        setStatus(`Download failed: ${r.status}`);
+        return;
+      }
+      const blob = await r.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${base}.${format}`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    },
+    [currentMarkdown, result]
+  );
+
+  return (
+    <main className="min-h-screen">
+      {/* Header */}
+      <header className="px-6 py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between sticky top-0 bg-slate-50/90 dark:bg-slate-950/90 backdrop-blur z-10">
+        <div>
+          <h1 className="text-xl font-semibold tracking-tight">
+            📄 PDF Extractor AI
+          </h1>
+          <p className="text-xs text-slate-500 mt-0.5">
+            Zero hallucinations. Every character preserved. Engaging Mode
+            reformats — never rewrites.
+          </p>
+        </div>
+        <div className="flex items-center gap-3">
+          <label className="flex items-center gap-2 text-xs">
+            <span className="text-slate-500">Zoom</span>
+            <input
+              type="range"
+              min={12}
+              max={24}
+              value={zoom}
+              onChange={(e) => setZoom(parseInt(e.target.value))}
+            />
+          </label>
+          <button
+            onClick={() => setDark((d) => !d)}
+            className="text-xs px-3 py-1.5 rounded-md border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800"
+          >
+            {dark ? "☀️ Light" : "🌙 Dark"}
+          </button>
+        </div>
+      </header>
+
+      <div className="px-6 py-6 max-w-[1600px] mx-auto">
+        {/* Upload area */}
+        {!result && (
+          <section
+            onDragOver={(e) => {
+              e.preventDefault();
+              setDragOver(true);
+            }}
+            onDragLeave={() => setDragOver(false)}
+            onDrop={(e) => {
+              e.preventDefault();
+              setDragOver(false);
+              onFiles(e.dataTransfer.files);
+            }}
+            className={`rounded-xl border-2 border-dashed p-10 text-center transition-colors ${
+              dragOver
+                ? "border-blue-500 bg-blue-50 dark:bg-blue-900/20"
+                : "border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900"
+            }`}
+          >
+            <div className="text-5xl mb-3">📥</div>
+            <p className="text-lg font-medium mb-1">
+              Drag & drop a PDF here
+            </p>
+            <p className="text-sm text-slate-500 mb-4">
+              or click to browse — any size, any language
+            </p>
+            <label className="inline-block cursor-pointer px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">
+              Choose PDF
+              <input
+                type="file"
+                accept="application/pdf,.pdf"
+                className="hidden"
+                onChange={(e) => onFiles(e.target.files)}
+              />
+            </label>
+            {file && (
+              <div className="mt-4 text-sm">
+                <strong>{file.name}</strong> · {(file.size / 1024 / 1024).toFixed(2)} MB
+                <div className="mt-3">
+                  <button
+                    disabled={uploading}
+                    onClick={extractNow}
+                    className="px-5 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-60"
+                  >
+                    {uploading ? "Extracting…" : "Extract Now"}
+                  </button>
+                </div>
+              </div>
+            )}
+          </section>
+        )}
+
+        {/* Status bar */}
+        {status && (
+          <div className="mt-4 text-xs text-slate-600 dark:text-slate-400">
+            {status}
+          </div>
+        )}
+
+        {/* Results */}
+        {result && (
+          <>
+            {/* Control bar */}
+            <div className="mt-2 mb-4 flex flex-wrap gap-3 items-center">
+              <div className="flex items-center rounded-lg border border-slate-300 dark:border-slate-700 overflow-hidden">
+                <button
+                  onClick={() => setMode("raw")}
+                  className={`px-3 py-1.5 text-sm ${
+                    mode === "raw"
+                      ? "bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900"
+                      : ""
+                  }`}
+                >
+                  📄 Raw
+                </button>
+                <button
+                  onClick={toggleEngaging}
+                  disabled={engagingLoading}
+                  className={`px-3 py-1.5 text-sm ${
+                    mode === "engaging"
+                      ? "bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900"
+                      : ""
+                  }`}
+                >
+                  {engagingLoading ? "✨ …" : "✨ Engaging"}
+                </button>
+              </div>
+              <button
+                onClick={() => setShowOriginal((v) => !v)}
+                className="text-sm px-3 py-1.5 rounded-md border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800"
+              >
+                {showOriginal ? "Hide original PDF" : "Show original PDF"}
+              </button>
+              <input
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="🔍 Search extracted content…"
+                className="px-3 py-1.5 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm min-w-[220px]"
+              />
+              <button
+                onClick={copyAll}
+                className="text-sm px-3 py-1.5 rounded-md border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800"
+              >
+                📋 Copy all
+              </button>
+              <div className="flex items-center rounded-lg border border-slate-300 dark:border-slate-700 overflow-hidden">
+                <button
+                  onClick={() => download("md")}
+                  className="px-3 py-1.5 text-sm hover:bg-slate-100 dark:hover:bg-slate-800"
+                >
+                  ⬇︎ MD
+                </button>
+                <button
+                  onClick={() => download("html")}
+                  className="px-3 py-1.5 text-sm border-l border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800"
+                >
+                  ⬇︎ HTML
+                </button>
+                <button
+                  onClick={() => download("txt")}
+                  className="px-3 py-1.5 text-sm border-l border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800"
+                >
+                  ⬇︎ TXT
+                </button>
+              </div>
+              <button
+                onClick={() => {
+                  setFile(null);
+                  setResult(null);
+                  setEngaging(null);
+                  setStatus("");
+                }}
+                className="ml-auto text-sm px-3 py-1.5 rounded-md border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800"
+              >
+                Upload another
+              </button>
+            </div>
+
+            {/* Confidence / integrity strip */}
+            <div className="mb-3 grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
+              <Badge
+                label="Pages"
+                value={String(result.result.page_count)}
+                tone="slate"
+              />
+              <Badge
+                label="Confidence"
+                value={`${Math.round(result.result.overall_confidence * 100)}%`}
+                tone={
+                  result.result.overall_confidence > 0.85
+                    ? "emerald"
+                    : result.result.overall_confidence > 0.6
+                    ? "amber"
+                    : "rose"
+                }
+              />
+              <Badge
+                label="Engines"
+                value={result.result.engines_used.join(" + ") || "none"}
+                tone="slate"
+              />
+              <Badge
+                label="SHA-256"
+                value={result.result.sha256.slice(0, 16) + "…"}
+                tone="slate"
+                mono
+              />
+            </div>
+
+            {result.result.warnings.length > 0 && (
+              <div className="mb-3 rounded-md border border-amber-300 bg-amber-50 dark:bg-amber-900/20 dark:border-amber-700 p-3 text-xs">
+                <strong>⚠️ Extraction flags</strong>
+                <ul className="list-disc ml-5 mt-1">
+                  {result.result.warnings.slice(0, 10).map((w, i) => (
+                    <li key={i}>{w}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {engagingMeta && mode === "engaging" && (
+              <div className="mb-3 text-[11px] text-slate-500">
+                Engaging Mode rendered via{" "}
+                <code>{engagingMeta.provider}</code> / <code>{engagingMeta.model}</code>.
+                Content is format-only; every word matches Raw Mode.
+              </div>
+            )}
+
+            {/* Main view */}
+            <div
+              className={`grid gap-4 ${
+                showOriginal && filePreviewUrl
+                  ? "grid-cols-1 lg:grid-cols-2"
+                  : "grid-cols-1"
+              }`}
+            >
+              {showOriginal && filePreviewUrl && (
+                <div className="rounded-lg border border-slate-200 dark:border-slate-800 overflow-hidden bg-white dark:bg-slate-900 h-[calc(100vh-260px)] min-h-[500px]">
+                  <object
+                    data={filePreviewUrl}
+                    type="application/pdf"
+                    className="w-full h-full"
+                  >
+                    <p className="p-4 text-sm">
+                      PDF preview unavailable.{" "}
+                      <a
+                        className="text-blue-600 underline"
+                        href={filePreviewUrl}
+                      >
+                        Open PDF
+                      </a>
+                    </p>
+                  </object>
+                </div>
+              )}
+              <div
+                ref={outputRef}
+                className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-6 overflow-auto h-[calc(100vh-260px)] min-h-[500px]"
+              >
+                <div
+                  className="prose-pdf"
+                  style={{ fontSize: `${zoom}px` }}
+                  dangerouslySetInnerHTML={{ __html: renderedHtml }}
+                />
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+    </main>
+  );
+}
+
+function Badge({
+  label,
+  value,
+  tone,
+  mono,
+}: {
+  label: string;
+  value: string;
+  tone: "slate" | "emerald" | "amber" | "rose";
+  mono?: boolean;
+}) {
+  const tones: Record<string, string> = {
+    slate:
+      "bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200 border-slate-200 dark:border-slate-700",
+    emerald:
+      "bg-emerald-100 dark:bg-emerald-900/30 text-emerald-800 dark:text-emerald-200 border-emerald-200 dark:border-emerald-800",
+    amber:
+      "bg-amber-100 dark:bg-amber-900/30 text-amber-800 dark:text-amber-200 border-amber-200 dark:border-amber-800",
+    rose:
+      "bg-rose-100 dark:bg-rose-900/30 text-rose-800 dark:text-rose-200 border-rose-200 dark:border-rose-800",
+  };
+  return (
+    <div
+      className={`rounded-md border px-3 py-2 ${tones[tone]}`}
+      title={label}
+    >
+      <div className="text-[10px] uppercase tracking-wide opacity-70">
+        {label}
+      </div>
+      <div className={`font-semibold ${mono ? "font-mono text-xs" : "text-sm"}`}>
+        {value}
+      </div>
+    </div>
+  );
+}

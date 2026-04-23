@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+*.egg
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+.cache/
+dist/
+build/
+
+# Logs
+*.log
+.DS_Store
+
+# Env
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Editors
+.vscode/
+.idea/
+
+# OS / misc
+Thumbs.db
+
+# Generated test artefacts
+backend/tests/sample.pdf
