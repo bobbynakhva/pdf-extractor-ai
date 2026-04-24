@@ -109,9 +109,11 @@
 .pdf-doc {
   display: flex;
   flex-direction: column;
-  align-items: center;
+  align-items: flex-start;
   gap: 24px;
   padding: 8px;
+  /* Pages are rendered at their natural 1 pt = 1.333 px scale. In a narrow
+     column the pages will overflow horizontally — the container scrolls. */
 }
 .pdf-page {
   background: white;
