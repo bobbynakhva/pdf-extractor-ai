@@ -69,12 +69,14 @@ class Page(BaseModel):
     # `.pdf-page` div with highlight overlays). May be empty when the page
     # was extracted via a fallback engine.
     layout_html: str = ""
-    # Pixel-perfect PNG render of the page (data URL). Produced by PyMuPDF
-    # `get_pixmap` at a high DPI so the Layout view shows exactly what the
-    # PDF renders to in any viewer — fonts, kerning, and all.
+    # URL the frontend fetches to get a pixel-perfect PNG render of this
+    # page. Populated by the /extract endpoint and points at the backend's
+    # lazy /render/{pdf_sha256}/{page} endpoint so we don't ship megabytes
+    # of base64 inside the JSON response.
     render_png: str = ""
-    # Natural PNG dimensions at render DPI. The frontend uses these to place
-    # highlight overlays in the same coordinate space as the raster.
+    # Natural PNG dimensions at the default render DPI. The frontend uses
+    # these to place highlight overlays in the same coordinate space as
+    # the raster.
     render_width: int = 0
     render_height: int = 0
 
@@ -91,6 +93,10 @@ class ExtractionResult(BaseModel):
     warnings: list[str] = Field(default_factory=list)
     plain_text: str = ""
     sha256: str = ""
+    # SHA-256 of the raw PDF bytes. Used as the cache key for the lazy
+    # /render endpoint. Exposed to the frontend so it can construct the
+    # PNG URLs client-side.
+    pdf_sha256: str = ""
     overall_confidence: float = 1.0
     # Concatenated positioned HTML for the whole document (all `.pdf-page`s
     # stacked vertically). Rendered by the frontend as the "PDF Layout" view.

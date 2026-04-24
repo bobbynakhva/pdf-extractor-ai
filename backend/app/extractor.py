@@ -250,20 +250,14 @@ def _extract_with_pymupdf(pdf_bytes: bytes, result: ExtractionResult) -> None:
                     f"Annotation iteration failed on page {page_index + 1}: {exc}"
                 )
 
-            # --- Pixel-perfect page render (for "PDF Layout" view) ---
-            try:
-                pix = page.get_pixmap(dpi=_RENDER_DPI, alpha=False)
-                png_bytes = pix.tobytes("png")
-                page_model.render_png = (
-                    "data:image/png;base64,"
-                    + base64.b64encode(png_bytes).decode("ascii")
-                )
-                page_model.render_width = int(pix.width)
-                page_model.render_height = int(pix.height)
-            except Exception as exc:
-                result.warnings.append(
-                    f"Page render failed on page {page_index + 1}: {exc}"
-                )
+            # --- Record render dimensions only (lazy: PNG is fetched via
+            # the /render endpoint on demand so we never hold all pages'
+            # bitmaps in memory at the same time). The actual PNG URL is
+            # filled in by main.py after extraction, once we know the
+            # PDF's SHA-256 cache key.
+            scale = _RENDER_DPI / 72.0
+            page_model.render_width = int(round(page_model.width * scale))
+            page_model.render_height = int(round(page_model.height * scale))
 
             # --- Positioned HTML (kept as a lighter, text-selectable fallback) ---
             try:

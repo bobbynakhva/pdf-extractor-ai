@@ -553,10 +553,17 @@ export default function Home() {
                         {p.render_png && (
                           // eslint-disable-next-line @next/next/no-img-element
                           <img
-                            src={p.render_png}
+                            src={
+                              p.render_png.startsWith("http") ||
+                              p.render_png.startsWith("data:")
+                                ? p.render_png
+                                : `${API_BASE}${p.render_png}`
+                            }
                             alt={`Page ${p.number}`}
                             width={p.render_width}
                             height={p.render_height}
+                            loading="lazy"
+                            decoding="async"
                             style={{
                               width: "100%",
                               height: "100%",
