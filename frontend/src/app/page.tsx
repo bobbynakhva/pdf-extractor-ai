@@ -47,6 +47,7 @@ type Page = {
   blocks: PageBlock[];
   plain_text: string;
   used_ocr: boolean;
+  layout_html?: string;
 };
 type ExtractionResult = {
   filename: string;
@@ -61,6 +62,7 @@ type ExtractionResult = {
   plain_text: string;
   sha256: string;
   overall_confidence: number;
+  layout_html?: string;
 };
 type ExtractResponse = { result: ExtractionResult; raw_markdown: string };
 
@@ -89,7 +91,7 @@ export default function Home() {
     provider: string;
     model: string;
   } | null>(null);
-  const [mode, setMode] = useState<"raw" | "engaging">("raw");
+  const [mode, setMode] = useState<"layout" | "raw" | "engaging">("layout");
   const [showOriginal, setShowOriginal] = useState(true);
   const [zoom, setZoom] = useState(16);
   const [search, setSearch] = useState("");
@@ -116,7 +118,7 @@ export default function Home() {
     setResult(null);
     setEngaging(null);
     setEngagingMeta(null);
-    setMode("raw");
+    setMode("layout");
   }, [filePreviewUrl]);
 
   const extractNow = useCallback(async () => {
@@ -155,7 +157,7 @@ export default function Home() {
   const toggleEngaging = useCallback(async () => {
     if (!result) return;
     if (mode === "engaging") {
-      setMode("raw");
+      setMode(result.result.layout_html ? "layout" : "raw");
       return;
     }
     if (engaging) {
@@ -197,13 +199,23 @@ export default function Home() {
   }, [result, mode, engaging]);
 
   const renderedHtml = useMemo(() => {
-    if (!currentMarkdown) return "";
-    marked.setOptions({ breaks: false, gfm: true });
-    const rawHtml = marked.parse(currentMarkdown, { async: false }) as string;
-    let html = DOMPurify.sanitize(rawHtml, {
-      ADD_ATTR: ["target", "rel"],
-      ADD_TAGS: ["u"],
-    });
+    if (!result) return "";
+    let html = "";
+    if (mode === "layout" && result.result.layout_html) {
+      // PyMuPDF-generated positioned HTML. Trusted source (our backend)
+      // but we still sanitize to strip scripts/event handlers.
+      html = DOMPurify.sanitize(result.result.layout_html, {
+        ADD_ATTR: ["target", "rel", "style", "title"],
+        ADD_TAGS: ["u", "mark"],
+      });
+    } else {
+      marked.setOptions({ breaks: false, gfm: true });
+      const rawHtml = marked.parse(currentMarkdown, { async: false }) as string;
+      html = DOMPurify.sanitize(rawHtml, {
+        ADD_ATTR: ["target", "rel"],
+        ADD_TAGS: ["u"],
+      });
+    }
     if (search.trim().length > 1) {
       const s = search.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&");
       const re = new RegExp(`(${s})`, "gi");
@@ -214,7 +226,7 @@ export default function Home() {
       );
     }
     return html;
-  }, [currentMarkdown, search]);
+  }, [result, mode, currentMarkdown, search]);
 
   const copyAll = useCallback(async () => {
     if (!currentMarkdown) return;
@@ -356,19 +368,35 @@ export default function Home() {
             <div className="mt-2 mb-4 flex flex-wrap gap-3 items-center">
               <div className="flex items-center rounded-lg border border-slate-300 dark:border-slate-700 overflow-hidden">
                 <button
+                  onClick={() => setMode("layout")}
+                  disabled={!result.result.layout_html}
+                  title={
+                    result.result.layout_html
+                      ? "Pixel-close PDF layout (positioned text, inline bold/italic/colors, highlight overlays)"
+                      : "Layout HTML unavailable (fallback extractor used)"
+                  }
+                  className={`px-3 py-1.5 text-sm disabled:opacity-40 ${
+                    mode === "layout"
+                      ? "bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900"
+                      : ""
+                  }`}
+                >
+                  🖼 PDF Layout
+                </button>
+                <button
                   onClick={() => setMode("raw")}
-                  className={`px-3 py-1.5 text-sm ${
+                  className={`px-3 py-1.5 text-sm border-l border-slate-300 dark:border-slate-700 ${
                     mode === "raw"
                       ? "bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900"
                       : ""
                   }`}
                 >
-                  📄 Raw
+                  📄 Raw MD
                 </button>
                 <button
                   onClick={toggleEngaging}
                   disabled={engagingLoading}
-                  className={`px-3 py-1.5 text-sm ${
+                  className={`px-3 py-1.5 text-sm border-l border-slate-300 dark:border-slate-700 ${
                     mode === "engaging"
                       ? "bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900"
                       : ""
@@ -510,8 +538,8 @@ export default function Home() {
                 className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-6 overflow-auto h-[calc(100vh-260px)] min-h-[500px]"
               >
                 <div
-                  className="prose-pdf"
-                  style={{ fontSize: `${zoom}px` }}
+                  className={mode === "layout" ? "" : "prose-pdf"}
+                  style={mode === "layout" ? undefined : { fontSize: `${zoom}px` }}
                   dangerouslySetInnerHTML={{ __html: renderedHtml }}
                 />
               </div>

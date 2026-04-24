@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import html as html_mod
 import io
 import logging
+import re
 from typing import Any
 
 from .models import (
@@ -242,11 +244,101 @@ def _extract_with_pymupdf(pdf_bytes: bytes, result: ExtractionResult) -> None:
                     f"Annotation iteration failed on page {page_index + 1}: {exc}"
                 )
 
+            # --- Positioned HTML (for "PDF Layout" view) ---
+            try:
+                page_model.layout_html = _page_layout_html(page, page_index, result)
+            except Exception as exc:
+                result.warnings.append(
+                    f"Layout HTML failed on page {page_index + 1}: {exc}"
+                )
+
             result.pages.append(page_model)
 
         result.engines_used.append("pymupdf")
     finally:
         doc.close()
+
+
+_BODY_RE = re.compile(r"<body[^>]*>(.*)</body>", re.DOTALL | re.IGNORECASE)
+_PAGE_DIV_ID_RE = re.compile(r'<div\s+id="page\d+"\s*', re.IGNORECASE)
+
+
+def _page_layout_html(page: Any, page_index: int, result: ExtractionResult) -> str:
+    """Generate a positioned HTML snippet for one page.
+
+    Uses PyMuPDF's ``get_text("html")`` which preserves fonts, sizes, colors,
+    inline bold/italic, and absolute positioning. On top we overlay translucent
+    rectangles for highlight annotations so they render inline with their
+    original color.
+    """
+    html = page.get_text("html") or ""
+    m = _BODY_RE.search(html)
+    body = m.group(1) if m else html
+    # PyMuPDF wraps each page in a `<div id="pageN" style="... width:... height:...">...</div>`.
+    # We want to ensure the page div has position:relative so overlays anchor to it.
+    body = _PAGE_DIV_ID_RE.sub(
+        f'<div class="pdf-page" id="pdf-page-{page_index + 1}" ', body, count=1
+    )
+    # Inject position:relative into the page div's style so overlays anchor.
+    body = re.sub(
+        r'(class="pdf-page"[^>]*?style=")',
+        r"\1position:relative;",
+        body,
+        count=1,
+    )
+
+    # Build highlight overlay divs from this page's annotations.
+    overlays: list[str] = []
+    page_num = page_index + 1
+    for a in result.annotations:
+        if a.page != page_num or not a.bbox:
+            continue
+        if a.kind not in {"highlight", "underline", "squiggly", "strikeout"}:
+            continue
+        color = a.color or "#ffff00"
+        x = a.bbox.x0
+        y = a.bbox.y0
+        w = max(0.0, a.bbox.x1 - a.bbox.x0)
+        h = max(0.0, a.bbox.y1 - a.bbox.y0)
+        tooltip = html_mod.escape(a.text or a.contents or a.kind)
+        if a.kind == "highlight":
+            style = (
+                f"position:absolute;left:{x:.2f}pt;top:{y:.2f}pt;"
+                f"width:{w:.2f}pt;height:{h:.2f}pt;"
+                f"background:{color};opacity:0.35;mix-blend-mode:multiply;"
+                f"pointer-events:none;border-radius:1px;"
+            )
+        elif a.kind == "underline":
+            style = (
+                f"position:absolute;left:{x:.2f}pt;top:{(y + h - 1):.2f}pt;"
+                f"width:{w:.2f}pt;height:1.2pt;background:{color};"
+                f"pointer-events:none;"
+            )
+        elif a.kind == "strikeout":
+            style = (
+                f"position:absolute;left:{x:.2f}pt;top:{(y + h / 2):.2f}pt;"
+                f"width:{w:.2f}pt;height:1.2pt;background:{color};"
+                f"pointer-events:none;"
+            )
+        else:  # squiggly
+            style = (
+                f"position:absolute;left:{x:.2f}pt;top:{(y + h - 2):.2f}pt;"
+                f"width:{w:.2f}pt;height:2pt;border-bottom:1.2pt wavy {color};"
+                f"pointer-events:none;"
+            )
+        overlays.append(
+            f'<div class="pdf-annot pdf-annot-{a.kind}" '
+            f'style="{style}" title="{tooltip}"></div>'
+        )
+
+    if overlays:
+        # Insert overlays just before the closing </div> of the page div.
+        body = body.rstrip()
+        if body.endswith("</div>"):
+            body = body[:-6] + "\n" + "\n".join(overlays) + "\n</div>"
+        else:
+            body = body + "\n" + "\n".join(overlays)
+    return body
 
 
 def _ocr_page(page: Any) -> str:
@@ -366,6 +458,11 @@ def extract_pdf(pdf_bytes: bytes, filename: str) -> ExtractionResult:
     # Concatenate plain text.
     result.plain_text = "\n\n".join(p.plain_text for p in result.pages)
     result.sha256 = _sha256_bytes(result.plain_text.encode("utf-8"))
+
+    # Assemble the document-level positioned HTML for the "PDF Layout" view.
+    layout_parts = [p.layout_html for p in result.pages if p.layout_html]
+    if layout_parts:
+        result.layout_html = '<div class="pdf-doc">\n' + "\n".join(layout_parts) + "\n</div>"
 
     # Overall confidence: average of all block confidences weighted by text length.
     total_w = 0.0

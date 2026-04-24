@@ -65,6 +65,10 @@ class Page(BaseModel):
     blocks: list[PageBlock] = Field(default_factory=list)
     plain_text: str = ""
     used_ocr: bool = False
+    # Positioned HTML for this page (PyMuPDF's "html" output wrapped in a
+    # `.pdf-page` div with highlight overlays). May be empty when the page
+    # was extracted via a fallback engine.
+    layout_html: str = ""
 
 
 class ExtractionResult(BaseModel):
@@ -80,6 +84,9 @@ class ExtractionResult(BaseModel):
     plain_text: str = ""
     sha256: str = ""
     overall_confidence: float = 1.0
+    # Concatenated positioned HTML for the whole document (all `.pdf-page`s
+    # stacked vertically). Rendered by the frontend as the "PDF Layout" view.
+    layout_html: str = ""
 
 
 class EngagingRequest(BaseModel):
