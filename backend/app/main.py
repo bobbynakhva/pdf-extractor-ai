@@ -706,6 +706,18 @@ if os.path.isdir(_FRONTEND_DIR):
     # `html=True` serves index.html for `/` and 404s (SPA-style).
     app.mount("/", StaticFiles(directory=_FRONTEND_DIR, html=True), name="frontend")
     log.info("serving frontend static export from %s", _FRONTEND_DIR)
+
+    # Stop browsers from caching the HTML shell so users always pick up the
+    # latest bundle after we ship a frontend change. Hashed JS/CSS chunks
+    # under _next/static/* keep their long cache since their filenames
+    # already include a content hash.
+    @app.middleware("http")
+    async def _no_cache_html(request, call_next):  # type: ignore[no-redef]
+        response = await call_next(request)
+        ct = response.headers.get("content-type", "")
+        if ct.startswith("text/html"):
+            response.headers["Cache-Control"] = "no-store, must-revalidate"
+        return response
 else:
 
     @app.get("/", include_in_schema=False)
