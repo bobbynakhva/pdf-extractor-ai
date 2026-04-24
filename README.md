@@ -4,7 +4,7 @@ Web app that extracts **every piece of information** from any PDF — text, tabl
 
 - **Backend:** FastAPI + PyMuPDF + pdfplumber + pypdf (+ Tesseract OCR fallback)
 - **Frontend:** Next.js 14 (App Router) + TailwindCSS + `marked` + DOMPurify
-- **LLM (Engaging Mode):** OpenAI or Anthropic, with a strict format-only system prompt. Falls back to a deterministic rule-based formatter when no API key is configured so the feature still works end-to-end.
+- **LLM (Engaging Mode):** CLōD (OpenAI-compatible gateway with 100 free requests/day), OpenAI, or Anthropic, with a strict format-only system prompt. Falls back to a deterministic rule-based formatter when no API key is configured so the feature still works end-to-end.
 
 ## Highlights
 
@@ -57,8 +57,10 @@ cd backend
 python -m venv .venv && source .venv/bin/activate
 pip install -e .
 # Optional: Engaging Mode API key (otherwise it uses a deterministic local reformatter)
-export LLM_PROVIDER=openai   # or "anthropic"
-export OPENAI_API_KEY=sk-...
+export LLM_PROVIDER=clod     # "clod" | "openai" | "anthropic"
+export CLOD_API_KEY=clod-... # grab one free at https://app.clod.io
+# export CLOD_MODEL="DeepSeek V3"
+# or: export OPENAI_API_KEY=sk-...
 # or: export ANTHROPIC_API_KEY=sk-ant-...
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```

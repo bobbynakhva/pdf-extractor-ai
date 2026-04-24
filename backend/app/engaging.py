@@ -1,9 +1,10 @@
 """Engaging Mode via LLM.
 
-Providers: OpenAI or Anthropic. Selected by env var ``LLM_PROVIDER``
-(``openai`` | ``anthropic`` | ``none``). If no key is configured we fall back
-to a deterministic, local reformatter so the feature still works end-to-end
-without hitting an API — still no content alteration.
+Providers: CLōD (OpenAI-compatible gateway), OpenAI, or Anthropic. Selected by
+env var ``LLM_PROVIDER`` (``clod`` | ``openai`` | ``anthropic`` | ``none``).
+If no key is configured we fall back to a deterministic, local reformatter so
+the feature still works end-to-end without hitting an API — still no content
+alteration.
 """
 from __future__ import annotations
 
@@ -47,11 +48,15 @@ def _sha256(s: str) -> str:
 
 def engaging_from_raw(raw_markdown: str, model: str | None = None) -> EngagingOutput:
     provider = (os.getenv("LLM_PROVIDER") or "").strip().lower()
+    if provider == "clod" and os.getenv("CLOD_API_KEY"):
+        return _engaging_clod(raw_markdown, model)
     if provider == "openai" and os.getenv("OPENAI_API_KEY"):
         return _engaging_openai(raw_markdown, model)
     if provider == "anthropic" and os.getenv("ANTHROPIC_API_KEY"):
         return _engaging_anthropic(raw_markdown, model)
     # Auto-detect if provider unset.
+    if os.getenv("CLOD_API_KEY"):
+        return _engaging_clod(raw_markdown, model)
     if os.getenv("OPENAI_API_KEY"):
         return _engaging_openai(raw_markdown, model)
     if os.getenv("ANTHROPIC_API_KEY"):
@@ -62,7 +67,32 @@ def engaging_from_raw(raw_markdown: str, model: str | None = None) -> EngagingOu
 def _engaging_openai(raw: str, model: str | None) -> EngagingOutput:
     model = model or os.getenv("OPENAI_MODEL") or "gpt-4o-mini"
     api_key = os.environ["OPENAI_API_KEY"]
-    url = "https://api.openai.com/v1/chat/completions"
+    base = (os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1").rstrip("/")
+    return _chat_completions(
+        url=f"{base}/chat/completions",
+        api_key=api_key,
+        model=model,
+        raw=raw,
+        provider="openai",
+    )
+
+
+def _engaging_clod(raw: str, model: str | None) -> EngagingOutput:
+    model = model or os.getenv("CLOD_MODEL") or "DeepSeek V3"
+    api_key = os.environ["CLOD_API_KEY"]
+    base = (os.getenv("CLOD_BASE_URL") or "https://api.clod.io/v1").rstrip("/")
+    return _chat_completions(
+        url=f"{base}/chat/completions",
+        api_key=api_key,
+        model=model,
+        raw=raw,
+        provider="clod",
+    )
+
+
+def _chat_completions(
+    *, url: str, api_key: str, model: str, raw: str, provider: str
+) -> EngagingOutput:
     payload = {
         "model": model,
         "messages": [
@@ -70,15 +100,16 @@ def _engaging_openai(raw: str, model: str | None) -> EngagingOutput:
             {"role": "user", "content": USER_PREFIX + raw},
         ],
         "temperature": 0,
+        "max_completion_tokens": 8192,
     }
-    with httpx.Client(timeout=120) as client:
+    with httpx.Client(timeout=180) as client:
         r = client.post(
             url, json=payload, headers={"Authorization": f"Bearer {api_key}"}
         )
         r.raise_for_status()
         data = r.json()
     text = data["choices"][0]["message"]["content"]
-    return EngagingOutput(text, "openai", model)
+    return EngagingOutput(text, provider, model)
 
 
 def _engaging_anthropic(raw: str, model: str | None) -> EngagingOutput:
