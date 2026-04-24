@@ -277,12 +277,27 @@ def _convert_pdf_to_docx_pdf2docx(pdf_bytes: bytes) -> bytes:
 
 
 @app.get("/export-docx/{pdf_sha256}")
-def export_docx(pdf_sha256: str, filename: str | None = None) -> Response:
+def export_docx(
+    pdf_sha256: str,
+    filename: str | None = None,
+    engine: str | None = None,
+) -> Response:
     """Convert a previously-extracted PDF to a Word (.docx) document.
 
-    Preserves layout, fonts, tables and images. Prefers LibreOffice's
-    PDF import filter (highest fidelity) and falls back to `pdf2docx`
-    when LibreOffice is unavailable.
+    Two engines are available:
+
+    * ``engine=editable`` (default): uses ``pdf2docx`` to produce a
+      document with **flowing paragraphs and real Word tables**. Content
+      is fully selectable and editable in Word or Google Docs, with
+      fonts, bold/italic, colors and images preserved. Absolute
+      positioning is not retained — reflowing is required for the text
+      to be selectable at all.
+    * ``engine=layout``: uses LibreOffice's ``writer_pdf_import`` to
+      preserve the original visual layout pixel-for-pixel. Produces a
+      file where each text snippet lives inside a Text Frame (drawing
+      object), so the layout matches but the text is **not flowing /
+      not easily editable**. Use when you want a "print replica" rather
+      than an editing target.
     """
     if not _SHA_RE.match(pdf_sha256):
         raise HTTPException(400, "invalid pdf_sha256")
@@ -292,12 +307,27 @@ def export_docx(pdf_sha256: str, filename: str | None = None) -> Response:
             404, "PDF not cached; re-upload via /extract to refresh the cache"
         )
 
-    body: bytes | None = _convert_pdf_to_docx_libreoffice(data)
-    engine = "libreoffice"
-    if body is None:
+    mode = (engine or "editable").lower()
+    if mode not in {"editable", "layout"}:
+        raise HTTPException(400, "engine must be 'editable' or 'layout'")
+
+    body: bytes | None = None
+    used = ""
+    if mode == "layout":
+        body = _convert_pdf_to_docx_libreoffice(data)
+        used = "libreoffice"
+        if body is None:
+            # Gracefully fall back so the download never fails silently.
+            try:
+                body = _convert_pdf_to_docx_pdf2docx(data)
+                used = "pdf2docx (libreoffice unavailable)"
+            except Exception as exc:
+                log.exception("pdf->docx conversion failed")
+                raise HTTPException(500, f"pdf->docx conversion failed: {exc}") from exc
+    else:
         try:
             body = _convert_pdf_to_docx_pdf2docx(data)
-            engine = "pdf2docx"
+            used = "pdf2docx"
         except Exception as exc:
             log.exception("pdf->docx conversion failed")
             raise HTTPException(500, f"pdf->docx conversion failed: {exc}") from exc
@@ -311,7 +341,7 @@ def export_docx(pdf_sha256: str, filename: str | None = None) -> Response:
         headers={
             "Content-Disposition": f'attachment; filename="{safe}.docx"',
             "Cache-Control": "public, max-age=3600",
-            "X-Docx-Engine": engine,
+            "X-Docx-Engine": used,
         },
     )
 

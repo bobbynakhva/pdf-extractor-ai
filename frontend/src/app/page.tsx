@@ -270,38 +270,51 @@ export default function Home() {
     [currentMarkdown, result]
   );
 
-  const [docxLoading, setDocxLoading] = useState(false);
-  const downloadDocx = useCallback(async () => {
-    if (!result?.result.pdf_sha256) return;
-    const base = result.result.filename.replace(/\.pdf$/i, "") || "extracted";
-    setDocxLoading(true);
-    setStatus("Converting PDF to Word (.docx)…");
-    try {
-      const r = await fetch(
-        `${API_BASE}/export-docx/${result.result.pdf_sha256}?filename=${encodeURIComponent(base)}`
+  const [docxLoading, setDocxLoading] = useState<"editable" | "layout" | null>(null);
+  const downloadDocx = useCallback(
+    async (engineMode: "editable" | "layout") => {
+      if (!result?.result.pdf_sha256) return;
+      const base = result.result.filename.replace(/\.pdf$/i, "") || "extracted";
+      setDocxLoading(engineMode);
+      setStatus(
+        engineMode === "editable"
+          ? "Converting to editable Word document (flowing paragraphs + tables)…"
+          : "Converting to layout Word document (pixel-perfect frames)…"
       );
-      if (!r.ok) {
-        const txt = await r.text();
-        setStatus(`Word export failed: ${txt || r.status}`);
-        return;
+      try {
+        const r = await fetch(
+          `${API_BASE}/export-docx/${result.result.pdf_sha256}` +
+            `?filename=${encodeURIComponent(base)}&engine=${engineMode}`
+        );
+        if (!r.ok) {
+          const txt = await r.text();
+          setStatus(`Word export failed: ${txt || r.status}`);
+          return;
+        }
+        const blob = await r.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        const suffix = engineMode === "layout" ? "-layout" : "";
+        a.download = `${base}${suffix}.docx`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+        setStatus(
+          engineMode === "editable"
+            ? `Saved ${base}.docx — text, tables and images are selectable and editable in Word or Google Docs.`
+            : `Saved ${base}-layout.docx — pixel-perfect layout. Text lives in frames so it's not freely editable; use the editable mode for editing.`
+        );
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e);
+        setStatus(`Word export failed: ${msg}`);
+      } finally {
+        setDocxLoading(null);
       }
-      const blob = await r.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `${base}.docx`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-      setStatus(`Saved ${base}.docx (PDF layout preserved — open in Word or Google Docs).`);
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e);
-      setStatus(`Word export failed: ${msg}`);
-    } finally {
-      setDocxLoading(false);
-    }
-  }, [result]);
+    },
+    [result]
+  );
 
   return (
     <main className="min-h-screen">
@@ -478,14 +491,28 @@ export default function Home() {
                   ⬇︎ TXT
                 </button>
               </div>
-              <button
-                onClick={downloadDocx}
-                disabled={docxLoading || !result?.result.pdf_sha256}
-                title="Convert to Word (.docx) preserving PDF layout, fonts, tables and images"
-                className="text-sm px-3 py-1.5 rounded-md border border-blue-300 bg-blue-50 text-blue-700 hover:bg-blue-100 dark:border-blue-800 dark:bg-blue-950 dark:text-blue-300 dark:hover:bg-blue-900 disabled:opacity-60"
-              >
-                {docxLoading ? "⏳ Converting…" : "📝 Copy to Word (.docx)"}
-              </button>
+              <div className="flex items-center rounded-lg border border-blue-300 dark:border-blue-800 overflow-hidden bg-blue-50 dark:bg-blue-950">
+                <button
+                  onClick={() => downloadDocx("editable")}
+                  disabled={!!docxLoading || !result?.result.pdf_sha256}
+                  title="Editable Word document — flowing paragraphs and real Word tables, fully selectable and editable in Word / Google Docs."
+                  className="px-3 py-1.5 text-sm text-blue-700 hover:bg-blue-100 dark:text-blue-300 dark:hover:bg-blue-900 disabled:opacity-60"
+                >
+                  {docxLoading === "editable"
+                    ? "⏳ Converting…"
+                    : "📝 Word (editable)"}
+                </button>
+                <button
+                  onClick={() => downloadDocx("layout")}
+                  disabled={!!docxLoading || !result?.result.pdf_sha256}
+                  title="Layout Word document — pixel-perfect match of the PDF. Text lives in frames, so it's a print replica, not freely editable."
+                  className="px-3 py-1.5 text-sm border-l border-blue-300 dark:border-blue-800 text-blue-700 hover:bg-blue-100 dark:text-blue-300 dark:hover:bg-blue-900 disabled:opacity-60"
+                >
+                  {docxLoading === "layout"
+                    ? "⏳ Converting…"
+                    : "🖼 Word (layout)"}
+                </button>
+              </div>
               <button
                 onClick={() => {
                   setFile(null);
