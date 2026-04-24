@@ -277,6 +277,253 @@ def _convert_pdf_to_docx_pdf2docx(pdf_bytes: bytes) -> bytes:
         return docx_path.read_bytes()
 
 
+# ---------- DOCX export: background-job pipeline ----------
+#
+# Large PDFs take 30+ seconds (up to several minutes) to convert via
+# pdf2docx, which is well beyond what browsers, proxies and tunnels are
+# willing to hold open on a single HTTP request. We run the actual
+# conversion on a background worker thread and expose three endpoints:
+#
+#     POST /export-docx/{sha}/jobs?engine=...   -> {job_id, state}
+#     GET  /export-docx/jobs/{job_id}           -> progress snapshot
+#     GET  /export-docx/jobs/{job_id}/result    -> 200 docx when ready,
+#                                                  202 while still running
+#
+# The legacy `GET /export-docx/{sha}` handler below synchronously blocks
+# for small PDFs (<= _DOCX_SYNC_PAGE_LIMIT pages) and otherwise delegates
+# to the job path so short docs still download in one shot.
+
+_DOCX_JOBS_MAX = int(os.getenv("DOCX_JOBS_MAX", "32"))
+_DOCX_JOBS_TTL = int(os.getenv("DOCX_JOBS_TTL", "3600"))  # 1 hour
+_DOCX_SYNC_PAGE_LIMIT = int(os.getenv("DOCX_SYNC_PAGE_LIMIT", "10"))
+
+
+class _DocxJob:
+    __slots__ = (
+        "job_id",
+        "sha",
+        "engine",
+        "state",
+        "progress",
+        "total",
+        "phase",
+        "result_bytes",
+        "result_engine",
+        "error",
+        "created_at",
+        "finished_at",
+        "thread",
+    )
+
+    def __init__(self, job_id: str, sha: str, engine: str) -> None:
+        self.job_id = job_id
+        self.sha = sha
+        self.engine = engine
+        self.state = "pending"
+        self.progress = 0
+        self.total = 0
+        self.phase = "queued"
+        self.result_bytes: bytes | None = None
+        self.result_engine = ""
+        self.error: str | None = None
+        self.created_at = time.time()
+        self.finished_at: float | None = None
+        self.thread: threading.Thread | None = None
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "job_id": self.job_id,
+            "state": self.state,
+            "engine": self.engine,
+            "phase": self.phase,
+            "progress": self.progress,
+            "total": self.total,
+            "result_engine": self.result_engine,
+            "error": self.error,
+            "created_at": self.created_at,
+            "finished_at": self.finished_at,
+        }
+
+
+_docx_jobs: "OrderedDict[str, _DocxJob]" = OrderedDict()
+_docx_jobs_by_key: dict[tuple[str, str], str] = {}
+_docx_jobs_lock = threading.Lock()
+
+
+def _docx_jobs_purge_locked() -> None:
+    """Evict finished jobs older than TTL, then cap size to MAX."""
+    now = time.time()
+    stale = [
+        jid
+        for jid, job in _docx_jobs.items()
+        if job.finished_at is not None and now - job.finished_at > _DOCX_JOBS_TTL
+    ]
+    for jid in stale:
+        job = _docx_jobs.pop(jid, None)
+        if job is not None:
+            _docx_jobs_by_key.pop((job.sha, job.engine), None)
+    while len(_docx_jobs) > _DOCX_JOBS_MAX:
+        jid, job = _docx_jobs.popitem(last=False)
+        _docx_jobs_by_key.pop((job.sha, job.engine), None)
+
+
+def _install_pdf2docx_progress(job: _DocxJob) -> logging.Handler:
+    """Pipe pdf2docx's per-page log messages into the job's progress field.
+
+    pdf2docx prints e.g. ``(23/60) Page 23`` for both its parsing and
+    writing phases. We intercept the logger so the client can poll for
+    smooth progress during long conversions.
+    """
+    _PAGE_RE = re.compile(r"\((\d+)/(\d+)\) Page")
+
+    class _Handler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            try:
+                msg = record.getMessage()
+            except Exception:
+                return
+            m = _PAGE_RE.search(msg)
+            if m:
+                job.progress = int(m.group(1))
+                job.total = int(m.group(2))
+                return
+            if "Analyzing document" in msg:
+                job.phase = "analyzing"
+            elif "Parsing pages" in msg:
+                job.phase = "parsing"
+            elif "Creating pages" in msg:
+                job.phase = "writing"
+
+    h = _Handler(level=logging.INFO)
+    # pdf2docx uses ``logging.info(...)`` (root logger), so attach there.
+    # The handler only reacts to messages matching the page-progress regex
+    # or the known phase markers, so unrelated log records are ignored.
+    root = logging.getLogger()
+    if root.level > logging.INFO or root.level == logging.NOTSET:
+        root.setLevel(logging.INFO)
+    root.addHandler(h)
+    return h
+
+
+def _docx_worker(job: _DocxJob, pdf_bytes: bytes) -> None:
+    job.state = "running"
+    job.phase = "starting"
+    handler: logging.Handler | None = None
+    try:
+        if job.engine == "layout":
+            body = _convert_pdf_to_docx_libreoffice(pdf_bytes)
+            used = "libreoffice"
+            if body is None:
+                # Graceful fallback to editable path if LibreOffice missing.
+                job.phase = "falling-back-to-pdf2docx"
+                handler = _install_pdf2docx_progress(job)
+                body = _convert_pdf_to_docx_pdf2docx(pdf_bytes)
+                used = "pdf2docx (libreoffice unavailable)"
+        else:
+            handler = _install_pdf2docx_progress(job)
+            body = _convert_pdf_to_docx_pdf2docx(pdf_bytes)
+            used = "pdf2docx"
+        job.result_bytes = body
+        job.result_engine = used
+        job.state = "done"
+        job.phase = "done"
+        if job.total == 0:
+            job.total = 1
+        job.progress = job.total
+    except Exception as exc:  # noqa: BLE001 — surface all errors to the client
+        log.exception("pdf->docx job failed")
+        job.state = "error"
+        job.phase = "error"
+        job.error = str(exc)
+    finally:
+        job.finished_at = time.time()
+        if handler is not None:
+            logging.getLogger().removeHandler(handler)
+
+
+def _start_docx_job(pdf_sha256: str, engine: str) -> _DocxJob:
+    data = _cache_get(pdf_sha256)
+    if data is None:
+        raise HTTPException(
+            404, "PDF not cached; re-upload via /extract to refresh the cache"
+        )
+    key = (pdf_sha256, engine)
+    with _docx_jobs_lock:
+        _docx_jobs_purge_locked()
+        # Reuse an existing not-yet-expired job for the same (sha, engine),
+        # so repeated clicks don't kick off parallel conversions.
+        existing_jid = _docx_jobs_by_key.get(key)
+        if existing_jid is not None:
+            existing = _docx_jobs.get(existing_jid)
+            if existing is not None and existing.state != "error":
+                _docx_jobs.move_to_end(existing_jid)
+                return existing
+        job_id = hashlib.sha256(
+            f"{pdf_sha256}:{engine}:{time.time()}:{os.urandom(6).hex()}".encode()
+        ).hexdigest()[:24]
+        job = _DocxJob(job_id, pdf_sha256, engine)
+        _docx_jobs[job_id] = job
+        _docx_jobs_by_key[key] = job_id
+    t = threading.Thread(
+        target=_docx_worker, args=(job, data), name=f"docx-{job_id}", daemon=True
+    )
+    job.thread = t
+    t.start()
+    return job
+
+
+@app.post("/export-docx/{pdf_sha256}/jobs")
+def export_docx_start(
+    pdf_sha256: str, engine: str | None = None
+) -> dict[str, object]:
+    """Start a background PDF -> DOCX conversion. Returns a job_id."""
+    if not _SHA_RE.match(pdf_sha256):
+        raise HTTPException(400, "invalid pdf_sha256")
+    mode = (engine or "editable").lower()
+    if mode not in {"editable", "layout"}:
+        raise HTTPException(400, "engine must be 'editable' or 'layout'")
+    job = _start_docx_job(pdf_sha256, mode)
+    return job.as_dict()
+
+
+@app.get("/export-docx/jobs/{job_id}")
+def export_docx_status(job_id: str) -> dict[str, object]:
+    """Poll the status/progress of a conversion job."""
+    with _docx_jobs_lock:
+        job = _docx_jobs.get(job_id)
+    if job is None:
+        raise HTTPException(404, "unknown job_id (or expired)")
+    return job.as_dict()
+
+
+@app.get("/export-docx/jobs/{job_id}/result")
+def export_docx_result(job_id: str, filename: str | None = None) -> Response:
+    """Download the converted docx once a job has finished."""
+    with _docx_jobs_lock:
+        job = _docx_jobs.get(job_id)
+    if job is None:
+        raise HTTPException(404, "unknown job_id (or expired)")
+    if job.state == "error":
+        raise HTTPException(500, job.error or "conversion failed")
+    if job.state != "done" or job.result_bytes is None:
+        # 202 Accepted: still running. Client should keep polling
+        # /export-docx/jobs/{job_id}.
+        return JSONResponse(job.as_dict(), status_code=202)
+
+    safe = (filename or "extracted").rsplit("/", 1)[-1].rsplit(".", 1)[0] or "extracted"
+    return Response(
+        content=job.result_bytes,
+        media_type=(
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        ),
+        headers={
+            "Content-Disposition": f'attachment; filename="{safe}.docx"',
+            "Cache-Control": "public, max-age=3600",
+            "X-Docx-Engine": job.result_engine,
+        },
+    )
+
+
 @app.get("/export-docx/{pdf_sha256}")
 def export_docx(
     pdf_sha256: str,
@@ -285,20 +532,23 @@ def export_docx(
 ) -> Response:
     """Convert a previously-extracted PDF to a Word (.docx) document.
 
+    Back-compat synchronous endpoint. Small documents (<=
+    ``DOCX_SYNC_PAGE_LIMIT`` pages) stream the result inline so simple
+    clients don't need to implement polling. Larger documents kick off
+    the background-job path and return a ``202`` with the ``job_id`` so
+    the client can poll ``/export-docx/jobs/{job_id}`` — this avoids the
+    60-second browser/proxy timeouts we were hitting for 50+-page PDFs.
+
     Two engines are available:
 
     * ``engine=editable`` (default): uses ``pdf2docx`` to produce a
-      document with **flowing paragraphs and real Word tables**. Content
+      document with flowing paragraphs and real Word tables. Content
       is fully selectable and editable in Word or Google Docs, with
-      fonts, bold/italic, colors and images preserved. Absolute
-      positioning is not retained — reflowing is required for the text
-      to be selectable at all.
+      fonts, bold/italic, colors and images preserved.
     * ``engine=layout``: uses LibreOffice's ``writer_pdf_import`` to
-      preserve the original visual layout pixel-for-pixel. Produces a
-      file where each text snippet lives inside a Text Frame (drawing
-      object), so the layout matches but the text is **not flowing /
-      not easily editable**. Use when you want a "print replica" rather
-      than an editing target.
+      preserve the original visual layout pixel-for-pixel. Text lives
+      inside drawing frames, so the layout matches but the content is
+      not freely editable.
     """
     if not _SHA_RE.match(pdf_sha256):
         raise HTTPException(400, "invalid pdf_sha256")
@@ -312,13 +562,35 @@ def export_docx(
     if mode not in {"editable", "layout"}:
         raise HTTPException(400, "engine must be 'editable' or 'layout'")
 
+    # Peek at the page count to decide whether to stream synchronously.
+    try:
+        import fitz  # type: ignore
+
+        with fitz.open(stream=data, filetype="pdf") as doc:
+            page_count = doc.page_count
+    except Exception:
+        page_count = 0
+
+    if page_count and page_count > _DOCX_SYNC_PAGE_LIMIT:
+        job = _start_docx_job(pdf_sha256, mode)
+        return JSONResponse(
+            {
+                **job.as_dict(),
+                "note": (
+                    "PDF too large for synchronous conversion — converting in "
+                    "background. Poll /export-docx/jobs/{job_id} and download "
+                    "from /export-docx/jobs/{job_id}/result when state='done'."
+                ),
+            },
+            status_code=202,
+        )
+
     body: bytes | None = None
     used = ""
     if mode == "layout":
         body = _convert_pdf_to_docx_libreoffice(data)
         used = "libreoffice"
         if body is None:
-            # Gracefully fall back so the download never fails silently.
             try:
                 body = _convert_pdf_to_docx_pdf2docx(data)
                 used = "pdf2docx (libreoffice unavailable)"

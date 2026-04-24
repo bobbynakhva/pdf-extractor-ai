@@ -275,23 +275,97 @@ export default function Home() {
     async (engineMode: "editable" | "layout") => {
       if (!result?.result.pdf_sha256) return;
       const base = result.result.filename.replace(/\.pdf$/i, "") || "extracted";
+      const sha = result.result.pdf_sha256;
       setDocxLoading(engineMode);
       setStatus(
         engineMode === "editable"
-          ? "Converting to editable Word document (flowing paragraphs + tables)…"
-          : "Converting to layout Word document (pixel-perfect frames)…"
+          ? "Queuing editable Word conversion…"
+          : "Queuing layout Word conversion…"
       );
       try {
-        const r = await fetch(
-          `${API_BASE}/export-docx/${result.result.pdf_sha256}` +
-            `?filename=${encodeURIComponent(base)}&engine=${engineMode}`
+        const startRes = await fetch(
+          `${API_BASE}/export-docx/${sha}/jobs?engine=${engineMode}`,
+          { method: "POST" }
         );
-        if (!r.ok) {
-          const txt = await r.text();
-          setStatus(`Word export failed: ${txt || r.status}`);
+        if (!startRes.ok) {
+          const txt = await startRes.text();
+          setStatus(`Word export failed: ${txt || startRes.status}`);
           return;
         }
-        const blob = await r.blob();
+        const startJson: {
+          job_id: string;
+          state: string;
+          phase: string;
+          progress: number;
+          total: number;
+          error?: string | null;
+        } = await startRes.json();
+
+        const jobId = startJson.job_id;
+        const startedAt = Date.now();
+        // Poll for up to 20 minutes. Each poll returns the same shape as
+        // the POST response, and the /result endpoint returns 202 until
+        // the job is done then 200 with the docx bytes.
+        const POLL_MS = 1500;
+        const MAX_MS = 20 * 60 * 1000;
+        let lastSeenProgress = -1;
+        while (true) {
+          if (Date.now() - startedAt > MAX_MS) {
+            setStatus("Word export timed out after 20 min. Try splitting the PDF.");
+            return;
+          }
+          await new Promise((r) => setTimeout(r, POLL_MS));
+          const statusRes = await fetch(`${API_BASE}/export-docx/jobs/${jobId}`);
+          if (!statusRes.ok) {
+            const txt = await statusRes.text();
+            setStatus(`Word export failed: ${txt || statusRes.status}`);
+            return;
+          }
+          const js: {
+            state: string;
+            phase: string;
+            progress: number;
+            total: number;
+            error?: string | null;
+          } = await statusRes.json();
+          if (js.state === "error") {
+            setStatus(`Word export failed: ${js.error || "unknown error"}`);
+            return;
+          }
+          if (js.progress !== lastSeenProgress || js.state !== "running") {
+            lastSeenProgress = js.progress;
+            const pct =
+              js.total > 0
+                ? ` (${Math.round((js.progress / js.total) * 100)}%)`
+                : "";
+            const phaseLabel =
+              js.phase === "parsing"
+                ? "Parsing"
+                : js.phase === "writing"
+                  ? "Writing"
+                  : js.phase === "analyzing"
+                    ? "Analyzing"
+                    : js.phase === "done"
+                      ? "Finalizing"
+                      : js.state;
+            setStatus(
+              `${phaseLabel} ${engineMode === "editable" ? "editable" : "layout"} Word doc${
+                js.total ? ` — page ${js.progress}/${js.total}${pct}` : `…${pct}`
+              }`
+            );
+          }
+          if (js.state === "done") break;
+        }
+
+        const dlRes = await fetch(
+          `${API_BASE}/export-docx/jobs/${jobId}/result?filename=${encodeURIComponent(base)}`
+        );
+        if (!dlRes.ok) {
+          const txt = await dlRes.text();
+          setStatus(`Word export failed: ${txt || dlRes.status}`);
+          return;
+        }
+        const blob = await dlRes.blob();
         const url = URL.createObjectURL(blob);
         const a = document.createElement("a");
         a.href = url;
