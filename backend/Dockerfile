@@ -2,10 +2,12 @@ FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
 
-# System deps needed for OCR fallback and image ops
+# System deps needed for OCR fallback, image ops, and high-fidelity
+# PDF -> DOCX conversion via LibreOffice's Writer PDF import filter.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       tesseract-ocr poppler-utils libgl1 \
+      libreoffice-writer libreoffice-core \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

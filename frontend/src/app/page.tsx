@@ -64,6 +64,7 @@ type ExtractionResult = {
   warnings: string[];
   plain_text: string;
   sha256: string;
+  pdf_sha256?: string;
   overall_confidence: number;
   layout_html?: string;
 };
@@ -269,6 +270,39 @@ export default function Home() {
     [currentMarkdown, result]
   );
 
+  const [docxLoading, setDocxLoading] = useState(false);
+  const downloadDocx = useCallback(async () => {
+    if (!result?.result.pdf_sha256) return;
+    const base = result.result.filename.replace(/\.pdf$/i, "") || "extracted";
+    setDocxLoading(true);
+    setStatus("Converting PDF to Word (.docx)…");
+    try {
+      const r = await fetch(
+        `${API_BASE}/export-docx/${result.result.pdf_sha256}?filename=${encodeURIComponent(base)}`
+      );
+      if (!r.ok) {
+        const txt = await r.text();
+        setStatus(`Word export failed: ${txt || r.status}`);
+        return;
+      }
+      const blob = await r.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${base}.docx`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      setStatus(`Saved ${base}.docx (PDF layout preserved — open in Word or Google Docs).`);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setStatus(`Word export failed: ${msg}`);
+    } finally {
+      setDocxLoading(false);
+    }
+  }, [result]);
+
   return (
     <main className="min-h-screen">
       {/* Header */}
@@ -444,6 +478,14 @@ export default function Home() {
                   ⬇︎ TXT
                 </button>
               </div>
+              <button
+                onClick={downloadDocx}
+                disabled={docxLoading || !result?.result.pdf_sha256}
+                title="Convert to Word (.docx) preserving PDF layout, fonts, tables and images"
+                className="text-sm px-3 py-1.5 rounded-md border border-blue-300 bg-blue-50 text-blue-700 hover:bg-blue-100 dark:border-blue-800 dark:bg-blue-950 dark:text-blue-300 dark:hover:bg-blue-900 disabled:opacity-60"
+              >
+                {docxLoading ? "⏳ Converting…" : "📝 Copy to Word (.docx)"}
+              </button>
               <button
                 onClick={() => {
                   setFile(null);

@@ -72,6 +72,7 @@ def index() -> dict[str, object]:
             "POST /engaging (json: {raw_markdown})",
             "POST /download (json: {content, format, filename})",
             "GET  /render/{pdf_sha256}/{page}  (?dpi=N)",
+            "GET  /export-docx/{pdf_sha256}  (?filename=name)",
             "GET  /healthz",
         ],
     }
@@ -196,6 +197,121 @@ def render_page(pdf_sha256: str, page: int, dpi: int | None = None) -> Response:
             # Cache aggressively — the PDF bytes are immutable (sha in URL)
             # and the DPI is part of the URL's query string.
             "Cache-Control": "public, max-age=31536000, immutable",
+        },
+    )
+
+
+def _convert_pdf_to_docx_libreoffice(pdf_bytes: bytes) -> bytes | None:
+    """Convert PDF -> DOCX using LibreOffice's PDF import filter.
+
+    Returns the DOCX bytes on success, or None if LibreOffice is not
+    installed or the conversion fails. This path preserves layout, tables,
+    and images much more faithfully than `pdf2docx` does, so we prefer it
+    whenever the binary is available.
+    """
+    import shutil
+    import subprocess
+    import tempfile
+    from pathlib import Path
+
+    soffice = shutil.which("libreoffice") or shutil.which("soffice")
+    if not soffice:
+        return None
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        pdf_path = tmp / "input.pdf"
+        pdf_path.write_bytes(pdf_bytes)
+        # `writer_pdf_import` lets Writer open the PDF as editable content,
+        # then we re-save as docx. `--headless` + isolated UserProfile
+        # avoids per-user lock collisions if multiple requests overlap.
+        user_profile = (tmp / "lo_profile").as_uri()
+        try:
+            proc = subprocess.run(
+                [
+                    soffice,
+                    "--headless",
+                    f"-env:UserInstallation={user_profile}",
+                    "--infilter=writer_pdf_import",
+                    "--convert-to",
+                    "docx",
+                    "--outdir",
+                    str(tmp),
+                    str(pdf_path),
+                ],
+                capture_output=True,
+                timeout=120,
+                check=False,
+            )
+        except Exception as exc:
+            log.warning("libreoffice invocation failed: %s", exc)
+            return None
+        if proc.returncode != 0:
+            log.warning(
+                "libreoffice returned %s: %s",
+                proc.returncode,
+                proc.stderr.decode("utf-8", errors="replace")[:500],
+            )
+            return None
+        out_docx = tmp / "input.docx"
+        if not out_docx.exists():
+            return None
+        return out_docx.read_bytes()
+
+
+def _convert_pdf_to_docx_pdf2docx(pdf_bytes: bytes) -> bytes:
+    """Fallback pure-Python PDF -> DOCX via `pdf2docx`."""
+    import tempfile
+    from pathlib import Path
+
+    from pdf2docx import Converter  # type: ignore
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pdf_path = Path(tmpdir) / "input.pdf"
+        docx_path = Path(tmpdir) / "output.docx"
+        pdf_path.write_bytes(pdf_bytes)
+        cv = Converter(str(pdf_path))
+        # `multi_processing=False` keeps memory under control on small VMs.
+        cv.convert(str(docx_path), start=0, end=None, multi_processing=False)
+        cv.close()
+        return docx_path.read_bytes()
+
+
+@app.get("/export-docx/{pdf_sha256}")
+def export_docx(pdf_sha256: str, filename: str | None = None) -> Response:
+    """Convert a previously-extracted PDF to a Word (.docx) document.
+
+    Preserves layout, fonts, tables and images. Prefers LibreOffice's
+    PDF import filter (highest fidelity) and falls back to `pdf2docx`
+    when LibreOffice is unavailable.
+    """
+    if not _SHA_RE.match(pdf_sha256):
+        raise HTTPException(400, "invalid pdf_sha256")
+    data = _cache_get(pdf_sha256)
+    if data is None:
+        raise HTTPException(
+            404, "PDF not cached; re-upload via /extract to refresh the cache"
+        )
+
+    body: bytes | None = _convert_pdf_to_docx_libreoffice(data)
+    engine = "libreoffice"
+    if body is None:
+        try:
+            body = _convert_pdf_to_docx_pdf2docx(data)
+            engine = "pdf2docx"
+        except Exception as exc:
+            log.exception("pdf->docx conversion failed")
+            raise HTTPException(500, f"pdf->docx conversion failed: {exc}") from exc
+
+    safe = (filename or "extracted").rsplit("/", 1)[-1].rsplit(".", 1)[0] or "extracted"
+    return Response(
+        content=body,
+        media_type=(
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        ),
+        headers={
+            "Content-Disposition": f'attachment; filename="{safe}.docx"',
+            "Cache-Control": "public, max-age=3600",
+            "X-Docx-Engine": engine,
         },
     )
 
