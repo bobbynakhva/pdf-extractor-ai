@@ -1,0 +1,30 @@
+# One-command deploy for running the whole app locally.
+#
+# Usage:
+#   cp .env.example .env        # fill in CLOD_API_KEY (optional)
+#   docker compose up -d
+#   open http://localhost:8000
+#
+# To expose your localhost to the public internet (so you can use it from
+# your phone or share with a friend), run `cloudflared tunnel --url http://localhost:8000`
+# in another terminal after `brew install cloudflared` (or `apt install cloudflared`).
+services:
+  pdf-extractor:
+    build: .
+    image: pdf-extractor-ai:latest
+    container_name: pdf-extractor-ai
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      # Sensible defaults; override in .env if needed.
+      - PDF_RENDER_DPI=${PDF_RENDER_DPI:-150}
+      - RENDER_CACHE_TTL=${RENDER_CACHE_TTL:-1800}
+      - RENDER_CACHE_MAX=${RENDER_CACHE_MAX:-16}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz').read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

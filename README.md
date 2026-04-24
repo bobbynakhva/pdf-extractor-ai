@@ -48,7 +48,37 @@ frontend/              Next.js 14 app (App Router)
   src/app/page.tsx     upload, preview, Raw/Engaging toggle, search, copy, download
 ```
 
-## Running locally
+## Run it yourself (Docker — easiest)
+
+One command gets you a fully working app at `http://localhost:8000`. The backend serves the frontend, so there's just one URL. Requires [Docker Desktop](https://www.docker.com/products/docker-desktop/).
+
+```bash
+git clone https://github.com/bobbynakhva/pdf-extractor-ai.git
+cd pdf-extractor-ai
+make setup   # copies .env.example -> .env and builds the image
+make run     # starts the container; open http://localhost:8000
+```
+
+Other targets: `make logs` / `make stop` / `make restart` / `make rebuild` / `make clean`. Run `make help` for the full list.
+
+Engaging Mode works without any API key (deterministic local rules). To use CLōD / OpenAI / Anthropic, uncomment the keys in `.env` and `make restart`.
+
+### Expose it to the public internet (free)
+
+[Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) gives you a free public HTTPS URL for your local app — no port forwarding, no dynamic DNS, nothing to manage.
+
+```bash
+# install cloudflared first (only once)
+brew install cloudflared             # macOS
+# or apt/rpm: https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/
+
+make tunnel
+# prints:  https://<random>.trycloudflare.com  ← your public URL
+```
+
+For a permanent URL on your own domain, run `cloudflared tunnel login`, create a named tunnel, and route your subdomain at it — free with any domain you have on Cloudflare.
+
+## Running without Docker (dev mode)
 
 ### Backend
 
@@ -65,7 +95,7 @@ export CLOD_API_KEY=clod-... # grab one free at https://app.clod.io
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-Requires system packages: `tesseract-ocr` and `poppler-utils`.
+Requires system packages: `tesseract-ocr`, `poppler-utils`, and (for high-fidelity "Word (layout)" export) `libreoffice-writer` + `libreoffice-core`.
 
 ### Frontend
 

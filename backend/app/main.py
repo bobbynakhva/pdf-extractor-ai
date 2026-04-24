@@ -15,6 +15,7 @@ from typing import Literal
 from fastapi import FastAPI, File, Form, HTTPException, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .engaging import engaging_from_raw
@@ -63,8 +64,8 @@ def healthz() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.get("/")
-def index() -> dict[str, object]:
+@app.get("/api")
+def api_index() -> dict[str, object]:
     return {
         "name": "pdf-extractor-backend",
         "endpoints": [
@@ -72,7 +73,7 @@ def index() -> dict[str, object]:
             "POST /engaging (json: {raw_markdown})",
             "POST /download (json: {content, format, filename})",
             "GET  /render/{pdf_sha256}/{page}  (?dpi=N)",
-            "GET  /export-docx/{pdf_sha256}  (?filename=name)",
+            "GET  /export-docx/{pdf_sha256}  (?filename=name&engine=editable|layout)",
             "GET  /healthz",
         ],
     }
@@ -414,3 +415,27 @@ def _md_to_html_document(md: str, title: str) -> str:
         "marked.parse(document.getElementById('md').dataset.src);</script>"
         "</body></html>"
     )
+
+
+# --- Single-origin static hosting ---
+# If FRONTEND_DIR points at a built Next.js static export (`frontend/out`),
+# serve it at the root so the backend + frontend share one URL. This is how
+# the Docker image ships — the multi-stage build bakes the static files in,
+# and users can expose just one port (`/` serves the UI, `/extract` etc.
+# serve the API). Falls back to a plain "API only" landing page when no
+# frontend is present (e.g. when running the backend directly for dev).
+_FRONTEND_DIR = os.getenv(
+    "FRONTEND_DIR", os.path.join(os.path.dirname(__file__), "..", "frontend_static")
+)
+if os.path.isdir(_FRONTEND_DIR):
+    # `html=True` serves index.html for `/` and 404s (SPA-style).
+    app.mount("/", StaticFiles(directory=_FRONTEND_DIR, html=True), name="frontend")
+    log.info("serving frontend static export from %s", _FRONTEND_DIR)
+else:
+
+    @app.get("/", include_in_schema=False)
+    def _root_placeholder() -> dict[str, str]:
+        return {
+            "name": "pdf-extractor-backend",
+            "note": "No frontend bundle found. API is at /api.",
+        }
