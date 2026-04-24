@@ -73,7 +73,10 @@ def api_index() -> dict[str, object]:
             "POST /engaging (json: {raw_markdown})",
             "POST /download (json: {content, format, filename})",
             "GET  /render/{pdf_sha256}/{page}  (?dpi=N)",
-            "GET  /export-docx/{pdf_sha256}  (?filename=name&engine=editable|layout)",
+            "GET  /export-docx/{pdf_sha256}  (?filename=name&engine=editable|layout)  — sync for small PDFs, 202+job for large",
+            "POST /export-docx/{pdf_sha256}/jobs  (?engine=editable|layout)  — start background conversion",
+            "GET  /export-docx/jobs/{job_id}  — poll progress",
+            "GET  /export-docx/jobs/{job_id}/result  (?filename=name)  — download when state='done'",
             "GET  /healthz",
         ],
     }
