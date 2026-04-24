@@ -69,6 +69,14 @@ class Page(BaseModel):
     # `.pdf-page` div with highlight overlays). May be empty when the page
     # was extracted via a fallback engine.
     layout_html: str = ""
+    # Pixel-perfect PNG render of the page (data URL). Produced by PyMuPDF
+    # `get_pixmap` at a high DPI so the Layout view shows exactly what the
+    # PDF renders to in any viewer — fonts, kerning, and all.
+    render_png: str = ""
+    # Natural PNG dimensions at render DPI. The frontend uses these to place
+    # highlight overlays in the same coordinate space as the raster.
+    render_width: int = 0
+    render_height: int = 0
 
 
 class ExtractionResult(BaseModel):

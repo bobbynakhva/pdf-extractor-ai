@@ -48,6 +48,9 @@ type Page = {
   plain_text: string;
   used_ocr: boolean;
   layout_html?: string;
+  render_png?: string;
+  render_width?: number;
+  render_height?: number;
 };
 type ExtractionResult = {
   filename: string;
@@ -157,7 +160,9 @@ export default function Home() {
   const toggleEngaging = useCallback(async () => {
     if (!result) return;
     if (mode === "engaging") {
-      setMode(result.result.layout_html ? "layout" : "raw");
+      setMode(
+        result.result.pages.some((p) => p.render_png) ? "layout" : "raw"
+      );
       return;
     }
     if (engaging) {
@@ -200,22 +205,13 @@ export default function Home() {
 
   const renderedHtml = useMemo(() => {
     if (!result) return "";
-    let html = "";
-    if (mode === "layout" && result.result.layout_html) {
-      // PyMuPDF-generated positioned HTML. Trusted source (our backend)
-      // but we still sanitize to strip scripts/event handlers.
-      html = DOMPurify.sanitize(result.result.layout_html, {
-        ADD_ATTR: ["target", "rel", "style", "title"],
-        ADD_TAGS: ["u", "mark"],
-      });
-    } else {
-      marked.setOptions({ breaks: false, gfm: true });
-      const rawHtml = marked.parse(currentMarkdown, { async: false }) as string;
-      html = DOMPurify.sanitize(rawHtml, {
-        ADD_ATTR: ["target", "rel"],
-        ADD_TAGS: ["u"],
-      });
-    }
+    if (mode === "layout") return ""; // layout renders from pages[], not HTML
+    marked.setOptions({ breaks: false, gfm: true });
+    const rawHtml = marked.parse(currentMarkdown, { async: false }) as string;
+    let html = DOMPurify.sanitize(rawHtml, {
+      ADD_ATTR: ["target", "rel"],
+      ADD_TAGS: ["u"],
+    });
     if (search.trim().length > 1) {
       const s = search.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&");
       const re = new RegExp(`(${s})`, "gi");
@@ -227,6 +223,11 @@ export default function Home() {
     }
     return html;
   }, [result, mode, currentMarkdown, search]);
+
+  const layoutPages = useMemo(() => {
+    if (!result || mode !== "layout") return null;
+    return result.result.pages.filter((p) => p.render_png);
+  }, [result, mode]);
 
   const copyAll = useCallback(async () => {
     if (!currentMarkdown) return;
@@ -369,11 +370,11 @@ export default function Home() {
               <div className="flex items-center rounded-lg border border-slate-300 dark:border-slate-700 overflow-hidden">
                 <button
                   onClick={() => setMode("layout")}
-                  disabled={!result.result.layout_html}
+                  disabled={!result.result.pages.some((p) => p.render_png)}
                   title={
-                    result.result.layout_html
-                      ? "Pixel-close PDF layout (positioned text, inline bold/italic/colors, highlight overlays)"
-                      : "Layout HTML unavailable (fallback extractor used)"
+                    result.result.pages.some((p) => p.render_png)
+                      ? "Pixel-perfect PDF rendering with highlight overlays"
+                      : "Page rendering unavailable (fallback extractor used)"
                   }
                   className={`px-3 py-1.5 text-sm disabled:opacity-40 ${
                     mode === "layout"
@@ -535,13 +536,109 @@ export default function Home() {
               )}
               <div
                 ref={outputRef}
-                className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-6 overflow-auto h-[calc(100vh-260px)] min-h-[500px]"
+                className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-100 dark:bg-slate-950 overflow-auto h-[calc(100vh-260px)] min-h-[500px]"
               >
-                <div
-                  className={mode === "layout" ? "" : "prose-pdf"}
-                  style={mode === "layout" ? undefined : { fontSize: `${zoom}px` }}
-                  dangerouslySetInnerHTML={{ __html: renderedHtml }}
-                />
+                {mode === "layout" && layoutPages ? (
+                  <div className="pdf-doc">
+                    {layoutPages.map((p) => (
+                      <div
+                        key={p.number}
+                        className="pdf-page"
+                        style={{
+                          position: "relative",
+                          width: `${p.width}pt`,
+                          height: `${p.height}pt`,
+                        }}
+                      >
+                        {p.render_png && (
+                          // eslint-disable-next-line @next/next/no-img-element
+                          <img
+                            src={p.render_png}
+                            alt={`Page ${p.number}`}
+                            width={p.render_width}
+                            height={p.render_height}
+                            style={{
+                              width: "100%",
+                              height: "100%",
+                              display: "block",
+                            }}
+                          />
+                        )}
+                        {result.result.annotations
+                          .filter(
+                            (a) =>
+                              a.page === p.number &&
+                              a.bbox &&
+                              [
+                                "highlight",
+                                "underline",
+                                "squiggly",
+                                "strikeout",
+                              ].includes(a.kind)
+                          )
+                          .map((a, i) => {
+                            const b = a.bbox!;
+                            const w = Math.max(0, b.x1 - b.x0);
+                            const h = Math.max(0, b.y1 - b.y0);
+                            const color = a.color || "#ffff00";
+                            const base: React.CSSProperties = {
+                              position: "absolute",
+                              left: `${b.x0}pt`,
+                              top: `${b.y0}pt`,
+                              width: `${w}pt`,
+                              height: `${h}pt`,
+                              pointerEvents: "none",
+                            };
+                            const style: React.CSSProperties =
+                              a.kind === "highlight"
+                                ? {
+                                    ...base,
+                                    background: color,
+                                    opacity: 0.35,
+                                    mixBlendMode: "multiply",
+                                    borderRadius: 1,
+                                  }
+                                : a.kind === "underline"
+                                ? {
+                                    ...base,
+                                    top: `${b.y1 - 1}pt`,
+                                    height: "1.2pt",
+                                    background: color,
+                                  }
+                                : a.kind === "strikeout"
+                                ? {
+                                    ...base,
+                                    top: `${(b.y0 + b.y1) / 2}pt`,
+                                    height: "1.2pt",
+                                    background: color,
+                                  }
+                                : {
+                                    ...base,
+                                    top: `${b.y1 - 2}pt`,
+                                    height: "2pt",
+                                    borderBottom: `1.2pt wavy ${color}`,
+                                  };
+                            return (
+                              <div
+                                key={i}
+                                className={`pdf-annot pdf-annot-${a.kind}`}
+                                title={a.text || a.contents || a.kind}
+                                style={style}
+                              />
+                            );
+                          })}
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="p-6">
+                    <div
+                      className="prose-pdf"
+                      style={{ fontSize: `${zoom}px` }}
+                      dangerouslySetInnerHTML={{ __html: renderedHtml }}
+                    />
+                  </div>
+                )}
               </div>
             </div>
           </>

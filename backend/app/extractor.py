@@ -28,6 +28,12 @@ from .models import (
 
 log = logging.getLogger(__name__)
 
+# Resolution (dots-per-inch) for the "PDF Layout" raster. 150 balances
+# legibility (high-DPI fonts) against payload size. Override with env var.
+import os as _os
+
+_RENDER_DPI = int(_os.getenv("PDF_RENDER_DPI", "150"))
+
 # PDF annotation subtype codes we care about (PyMuPDF).
 HIGHLIGHT_SUBTYPES = {"Highlight", "Underline", "Squiggly", "StrikeOut"}
 TEXT_ANNOT_SUBTYPES = {"Text", "FreeText", "Stamp", "Ink"}
@@ -244,7 +250,22 @@ def _extract_with_pymupdf(pdf_bytes: bytes, result: ExtractionResult) -> None:
                     f"Annotation iteration failed on page {page_index + 1}: {exc}"
                 )
 
-            # --- Positioned HTML (for "PDF Layout" view) ---
+            # --- Pixel-perfect page render (for "PDF Layout" view) ---
+            try:
+                pix = page.get_pixmap(dpi=_RENDER_DPI, alpha=False)
+                png_bytes = pix.tobytes("png")
+                page_model.render_png = (
+                    "data:image/png;base64,"
+                    + base64.b64encode(png_bytes).decode("ascii")
+                )
+                page_model.render_width = int(pix.width)
+                page_model.render_height = int(pix.height)
+            except Exception as exc:
+                result.warnings.append(
+                    f"Page render failed on page {page_index + 1}: {exc}"
+                )
+
+            # --- Positioned HTML (kept as a lighter, text-selectable fallback) ---
             try:
                 page_model.layout_html = _page_layout_html(page, page_index, result)
             except Exception as exc:
