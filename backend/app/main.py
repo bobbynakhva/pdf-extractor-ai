@@ -263,7 +263,10 @@ def _convert_pdf_to_docx_libreoffice(pdf_bytes: bytes) -> bytes | None:
 
 
 def _convert_pdf_to_docx_pdf2docx(pdf_bytes: bytes) -> bytes:
-    """Fallback pure-Python PDF -> DOCX via `pdf2docx`."""
+    """Pure-Python in-process PDF -> DOCX via `pdf2docx`. Used by tests
+    and by the legacy synchronous endpoint for small PDFs. The robust
+    background-job path uses :func:`_convert_pdf_to_docx_pdf2docx_subprocess`
+    instead so we can kill stuck conversions."""
     import tempfile
     from pathlib import Path
 
@@ -278,6 +281,263 @@ def _convert_pdf_to_docx_pdf2docx(pdf_bytes: bytes) -> bytes:
         cv.convert(str(docx_path), start=0, end=None, multi_processing=False)
         cv.close()
         return docx_path.read_bytes()
+
+
+# Watchdog defaults for the subprocess-based pdf2docx runner. Tunable via
+# env vars in case a particularly dense page legitimately takes longer.
+_DOCX_PDF2DOCX_IDLE_TIMEOUT = int(os.getenv("DOCX_PDF2DOCX_IDLE_TIMEOUT", "120"))
+_DOCX_PDF2DOCX_TOTAL_TIMEOUT = int(os.getenv("DOCX_PDF2DOCX_TOTAL_TIMEOUT", "1800"))
+
+
+class DocxConversionTimeout(RuntimeError):
+    """Raised when the pdf2docx subprocess is killed by the watchdog."""
+
+
+def _convert_pdf_to_docx_pdf2docx_subprocess(
+    pdf_bytes: bytes,
+    on_progress: "callable[[str, int, int], None] | None" = None,
+    idle_timeout: int = _DOCX_PDF2DOCX_IDLE_TIMEOUT,
+    total_timeout: int = _DOCX_PDF2DOCX_TOTAL_TIMEOUT,
+) -> bytes:
+    """Run `pdf2docx convert` in a subprocess so we can kill it if it hangs.
+
+    Streams stderr line-by-line, parsing pdf2docx's `(N/M) Page N` and
+    phase markers. Calls ``on_progress(phase, progress, total)`` whenever
+    they advance. If no progress happens for ``idle_timeout`` seconds, or
+    the subprocess runs longer than ``total_timeout`` total seconds, kills
+    the subprocess and raises :class:`DocxConversionTimeout`.
+    """
+    import shutil
+    import subprocess
+    import tempfile
+    from pathlib import Path
+
+    pdf2docx_bin = shutil.which("pdf2docx")
+    if not pdf2docx_bin:
+        # Fall back to in-process; without the CLI we have no subprocess
+        # isolation so the watchdog can't help anyway.
+        return _convert_pdf_to_docx_pdf2docx(pdf_bytes)
+
+    page_re = re.compile(r"\((\d+)/(\d+)\) Page")
+    progress = {"phase": "starting", "progress": 0, "total": 0}
+    last_activity = [time.time()]
+    activity_lock = threading.Lock()
+
+    def _bump(phase: str | None, prog: int | None, total: int | None) -> None:
+        with activity_lock:
+            last_activity[0] = time.time()
+        if phase is not None:
+            progress["phase"] = phase
+        if prog is not None:
+            progress["progress"] = prog
+        if total is not None:
+            progress["total"] = total
+        if on_progress is not None:
+            try:
+                on_progress(progress["phase"], progress["progress"], progress["total"])
+            except Exception:
+                pass
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pdf_path = Path(tmpdir) / "input.pdf"
+        docx_path = Path(tmpdir) / "output.docx"
+        pdf_path.write_bytes(pdf_bytes)
+
+        env = os.environ.copy()
+        env["PYTHONUNBUFFERED"] = "1"
+        proc = subprocess.Popen(
+            [pdf2docx_bin, "convert", str(pdf_path), str(docx_path)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            env=env,
+        )
+
+        log_buffer: list[str] = []
+
+        def _reader() -> None:
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                line = line.rstrip()
+                if not line:
+                    continue
+                log_buffer.append(line)
+                if len(log_buffer) > 200:
+                    log_buffer.pop(0)
+                m = page_re.search(line)
+                if m:
+                    _bump(None, int(m.group(1)), int(m.group(2)))
+                elif "Analyzing document" in line:
+                    _bump("analyzing", None, None)
+                elif "Parsing pages" in line:
+                    _bump("parsing", None, None)
+                elif "Creating pages" in line:
+                    _bump("writing", None, None)
+                else:
+                    # Any other log line still counts as activity so the
+                    # idle watchdog doesn't kill a long but live process.
+                    with activity_lock:
+                        last_activity[0] = time.time()
+
+        reader = threading.Thread(target=_reader, name="pdf2docx-reader", daemon=True)
+        reader.start()
+
+        started = time.time()
+        kill_reason: str | None = None
+        while True:
+            try:
+                proc.wait(timeout=2)
+                break
+            except subprocess.TimeoutExpired:
+                pass
+            now = time.time()
+            with activity_lock:
+                idle_for = now - last_activity[0]
+            elapsed = now - started
+            if idle_for > idle_timeout:
+                kill_reason = (
+                    f"pdf2docx made no progress for {int(idle_for)}s "
+                    f"(stuck on page {progress['progress']}/{progress['total']})"
+                )
+                break
+            if elapsed > total_timeout:
+                kill_reason = (
+                    f"pdf2docx exceeded total timeout of {total_timeout}s "
+                    f"(at page {progress['progress']}/{progress['total']})"
+                )
+                break
+
+        if kill_reason is not None:
+            log.warning("killing pdf2docx subprocess: %s", kill_reason)
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            try:
+                proc.wait(timeout=10)
+            except Exception:
+                pass
+            reader.join(timeout=2)
+            tail = "\n".join(log_buffer[-15:])
+            raise DocxConversionTimeout(f"{kill_reason}\nlast log lines:\n{tail}")
+
+        reader.join(timeout=5)
+        if proc.returncode != 0:
+            tail = "\n".join(log_buffer[-15:])
+            raise RuntimeError(
+                f"pdf2docx exited with code {proc.returncode}\n{tail}"
+            )
+        if not docx_path.exists():
+            tail = "\n".join(log_buffer[-15:])
+            raise RuntimeError(f"pdf2docx produced no output\n{tail}")
+        return docx_path.read_bytes()
+
+
+def _convert_pdf_to_docx_from_extraction(pdf_bytes: bytes, filename: str) -> bytes:
+    """Build a DOCX directly from our extractor's output as a last-resort
+    fallback. Slower-than-pdf2docx layout fidelity (no multi-column, no
+    inline font sizing) but **cannot hang** because there's no PDF
+    parsing beyond the extractor we already trust. Output is fully
+    selectable and editable: real ``<w:p>`` paragraphs, real ``<w:tbl>``
+    Word tables and real ``<w:drawing>`` images.
+    """
+    import base64
+    import tempfile
+    from pathlib import Path
+
+    from docx import Document
+    from docx.shared import Inches, Pt, RGBColor
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+    result = extract_pdf(pdf_bytes, filename)
+    doc = Document()
+
+    # Page setup — match A4-ish defaults; original PDF page sizes vary so
+    # we can't emulate per-page sizing without per-page section breaks,
+    # which Word's model doesn't love. Letter/A4 is a reasonable default.
+    title = doc.add_paragraph()
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run = title.add_run(f"{result.filename}")
+    run.bold = True
+    run.font.size = Pt(14)
+    meta = doc.add_paragraph()
+    meta_run = meta.add_run(
+        f"Reconstructed from extraction (engines: "
+        f"{', '.join(result.engines_used) or 'none'}; "
+        f"{result.page_count} page(s))."
+    )
+    meta_run.italic = True
+    meta_run.font.color.rgb = RGBColor(0x66, 0x66, 0x66)
+
+    images_by_page: dict[int, list] = {}
+    for img in result.images:
+        images_by_page.setdefault(img.page, []).append(img)
+    tables_by_page: dict[int, list] = {}
+    for tbl in result.tables:
+        tables_by_page.setdefault(tbl.page, []).append(tbl)
+    annotations_by_page: dict[int, list] = {}
+    for ann in result.annotations:
+        annotations_by_page.setdefault(ann.page, []).append(ann)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        for page in result.pages:
+            doc.add_paragraph()  # spacer before each page section
+            heading = doc.add_paragraph()
+            hr = heading.add_run(f"Page {page.number}")
+            hr.bold = True
+            hr.font.size = Pt(11)
+            hr.font.color.rgb = RGBColor(0x88, 0x88, 0x88)
+
+            if page.plain_text.strip():
+                # Split on blank lines to keep paragraph breaks intact.
+                for para in re.split(r"\n\s*\n", page.plain_text.strip()):
+                    para = para.strip()
+                    if para:
+                        doc.add_paragraph(para)
+
+            for tbl in tables_by_page.get(page.number, []):
+                if not tbl.rows:
+                    continue
+                cols = max(len(r) for r in tbl.rows)
+                w_tbl = doc.add_table(rows=len(tbl.rows), cols=cols)
+                w_tbl.style = "Light Grid Accent 1"
+                for i, row in enumerate(tbl.rows):
+                    for j in range(cols):
+                        text = row[j] if j < len(row) else ""
+                        w_tbl.cell(i, j).text = str(text or "")
+
+            for img in images_by_page.get(page.number, []):
+                try:
+                    if not img.data_url.startswith("data:"):
+                        continue
+                    _, b64 = img.data_url.split(",", 1)
+                    img_bytes = base64.b64decode(b64)
+                    img_path = tmp / f"page{page.number}_img{img.index}.{img.ext}"
+                    img_path.write_bytes(img_bytes)
+                    p = doc.add_paragraph()
+                    run = p.add_run()
+                    # Cap width at 6 inches so massive scans don't overflow.
+                    run.add_picture(str(img_path), width=Inches(min(6, img.width / 96)))
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("could not embed image: %s", exc)
+
+            for ann in annotations_by_page.get(page.number, []):
+                if not ann.text and not ann.contents:
+                    continue
+                p = doc.add_paragraph()
+                tag = p.add_run(f"[{ann.kind}] ")
+                tag.italic = True
+                tag.font.color.rgb = RGBColor(0xCC, 0x66, 0x00)
+                p.add_run(ann.contents or ann.text or "")
+
+            if page.number != result.page_count:
+                doc.add_page_break()
+
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
 
 
 # ---------- DOCX export: background-job pipeline ----------
@@ -370,62 +630,67 @@ def _docx_jobs_purge_locked() -> None:
         _docx_jobs_by_key.pop((job.sha, job.engine), None)
 
 
-def _install_pdf2docx_progress(job: _DocxJob) -> logging.Handler:
-    """Pipe pdf2docx's per-page log messages into the job's progress field.
-
-    pdf2docx prints e.g. ``(23/60) Page 23`` for both its parsing and
-    writing phases. We intercept the logger so the client can poll for
-    smooth progress during long conversions.
-    """
-    _PAGE_RE = re.compile(r"\((\d+)/(\d+)\) Page")
-
-    class _Handler(logging.Handler):
-        def emit(self, record: logging.LogRecord) -> None:
-            try:
-                msg = record.getMessage()
-            except Exception:
-                return
-            m = _PAGE_RE.search(msg)
-            if m:
-                job.progress = int(m.group(1))
-                job.total = int(m.group(2))
-                return
-            if "Analyzing document" in msg:
-                job.phase = "analyzing"
-            elif "Parsing pages" in msg:
-                job.phase = "parsing"
-            elif "Creating pages" in msg:
-                job.phase = "writing"
-
-    h = _Handler(level=logging.INFO)
-    # pdf2docx uses ``logging.info(...)`` (root logger), so attach there.
-    # The handler only reacts to messages matching the page-progress regex
-    # or the known phase markers, so unrelated log records are ignored.
-    root = logging.getLogger()
-    if root.level > logging.INFO or root.level == logging.NOTSET:
-        root.setLevel(logging.INFO)
-    root.addHandler(h)
-    return h
-
-
-def _docx_worker(job: _DocxJob, pdf_bytes: bytes) -> None:
+def _docx_worker(job: _DocxJob, pdf_bytes: bytes, filename: str) -> None:
     job.state = "running"
     job.phase = "starting"
-    handler: logging.Handler | None = None
+
+    def _on_progress(phase: str, progress: int, total: int) -> None:
+        # Called from the pdf2docx-reader thread. Keep it cheap.
+        if phase:
+            job.phase = phase
+        if progress:
+            job.progress = progress
+        if total:
+            job.total = total
+
     try:
+        body: bytes | None = None
+        used = ""
+        log.info("docx worker starting: job=%s engine=%s", job.job_id, job.engine)
+
         if job.engine == "layout":
             body = _convert_pdf_to_docx_libreoffice(pdf_bytes)
             used = "libreoffice"
             if body is None:
-                # Graceful fallback to editable path if LibreOffice missing.
                 job.phase = "falling-back-to-pdf2docx"
-                handler = _install_pdf2docx_progress(job)
-                body = _convert_pdf_to_docx_pdf2docx(pdf_bytes)
-                used = "pdf2docx (libreoffice unavailable)"
+                log.warning(
+                    "libreoffice unavailable; falling back to pdf2docx for job %s",
+                    job.job_id,
+                )
+                try:
+                    body = _convert_pdf_to_docx_pdf2docx_subprocess(
+                        pdf_bytes, on_progress=_on_progress
+                    )
+                    used = "pdf2docx (libreoffice unavailable)"
+                except Exception as exc:  # noqa: BLE001
+                    log.warning(
+                        "pdf2docx subprocess failed for job %s: %s; "
+                        "falling back to extraction-based builder",
+                        job.job_id,
+                        exc,
+                    )
+                    job.phase = "falling-back-to-extraction"
+                    body = _convert_pdf_to_docx_from_extraction(pdf_bytes, filename)
+                    used = "extraction-fallback"
         else:
-            handler = _install_pdf2docx_progress(job)
-            body = _convert_pdf_to_docx_pdf2docx(pdf_bytes)
-            used = "pdf2docx"
+            try:
+                body = _convert_pdf_to_docx_pdf2docx_subprocess(
+                    pdf_bytes, on_progress=_on_progress
+                )
+                used = "pdf2docx"
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "pdf2docx subprocess failed for job %s: %s; "
+                    "falling back to extraction-based builder",
+                    job.job_id,
+                    exc,
+                )
+                job.phase = "falling-back-to-extraction"
+                body = _convert_pdf_to_docx_from_extraction(pdf_bytes, filename)
+                used = "extraction-fallback"
+
+        if not body:
+            raise RuntimeError("conversion produced empty output")
         job.result_bytes = body
         job.result_engine = used
         job.state = "done"
@@ -433,15 +698,19 @@ def _docx_worker(job: _DocxJob, pdf_bytes: bytes) -> None:
         if job.total == 0:
             job.total = 1
         job.progress = job.total
+        log.info(
+            "docx worker finished: job=%s engine=%s bytes=%d",
+            job.job_id,
+            used,
+            len(body),
+        )
     except Exception as exc:  # noqa: BLE001 — surface all errors to the client
-        log.exception("pdf->docx job failed")
+        log.exception("pdf->docx job %s failed", job.job_id)
         job.state = "error"
         job.phase = "error"
         job.error = str(exc)
     finally:
         job.finished_at = time.time()
-        if handler is not None:
-            logging.getLogger().removeHandler(handler)
 
 
 def _start_docx_job(pdf_sha256: str, engine: str) -> _DocxJob:
@@ -468,7 +737,10 @@ def _start_docx_job(pdf_sha256: str, engine: str) -> _DocxJob:
         _docx_jobs[job_id] = job
         _docx_jobs_by_key[key] = job_id
     t = threading.Thread(
-        target=_docx_worker, args=(job, data), name=f"docx-{job_id}", daemon=True
+        target=_docx_worker,
+        args=(job, data, f"{pdf_sha256[:12]}.pdf"),
+        name=f"docx-{job_id}",
+        daemon=True,
     )
     job.thread = t
     t.start()
@@ -514,6 +786,12 @@ def export_docx_result(job_id: str, filename: str | None = None) -> Response:
         return JSONResponse(job.as_dict(), status_code=202)
 
     safe = (filename or "extracted").rsplit("/", 1)[-1].rsplit(".", 1)[0] or "extracted"
+    # HTTP headers must be a single line, printable-ASCII only. Sanitize
+    # the engine tag in case it embeds a multi-line exception traceback
+    # or ANSI escape codes from a fallback path's error message.
+    engine_header = "".join(
+        c if 32 <= ord(c) < 127 else " " for c in (job.result_engine or "")
+    )[:200].strip() or "unknown"
     return Response(
         content=job.result_bytes,
         media_type=(
@@ -522,7 +800,7 @@ def export_docx_result(job_id: str, filename: str | None = None) -> Response:
         headers={
             "Content-Disposition": f'attachment; filename="{safe}.docx"',
             "Cache-Control": "public, max-age=3600",
-            "X-Docx-Engine": job.result_engine,
+            "X-Docx-Engine": engine_header,
         },
     )
 
