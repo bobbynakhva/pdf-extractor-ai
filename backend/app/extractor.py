@@ -495,8 +495,7 @@ def extract_pdf(pdf_bytes: bytes, filename: str) -> ExtractionResult:
 def result_to_raw_markdown(result: ExtractionResult) -> str:
     """Deterministic, lossless-ish Markdown rendering of the extracted content.
 
-    This is the "Raw Mode" canonical text that is also fed into Engaging Mode
-    so the LLM has the exact bytes to reformat.
+    This is the "Raw Mode" canonical text used for copy / download.
     """
     lines: list[str] = []
     lines.append(f"# {result.filename}")

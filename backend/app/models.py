@@ -102,14 +102,3 @@ class ExtractionResult(BaseModel):
     # stacked vertically). Rendered by the frontend as the "PDF Layout" view.
     layout_html: str = ""
 
-
-class EngagingRequest(BaseModel):
-    raw_markdown: str
-    model: Optional[str] = None
-
-
-class EngagingResponse(BaseModel):
-    engaging_markdown: str
-    provider: str
-    model: str
-    sha256_input: str

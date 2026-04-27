@@ -19,7 +19,7 @@ help:
 
 setup: ## Copy .env.example -> .env (edit to add API keys) and build the image
 	@test -f .env || cp .env.example .env
-	@echo "Edit .env to add CLOD_API_KEY (optional — app works without it)."
+	@echo "Edit .env if you want to override defaults (all optional)."
 	docker compose build
 
 run: ## Start the app. Open http://localhost:8000 afterward.

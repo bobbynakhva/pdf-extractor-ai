@@ -4,7 +4,7 @@ import "./globals.css";
 export const metadata: Metadata = {
   title: "PDF Extractor AI",
   description:
-    "Extract everything from any PDF with zero hallucinations. Optional Engaging Mode reformats — never rewrites — your content.",
+    "Extract everything from any PDF with zero hallucinations. Pixel-perfect layout view, Markdown export, editable Word export.",
 };
 
 export default function RootLayout({

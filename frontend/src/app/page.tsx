@@ -89,13 +89,7 @@ export default function Home() {
   const [uploading, setUploading] = useState(false);
   const [status, setStatus] = useState<string>("");
   const [result, setResult] = useState<ExtractResponse | null>(null);
-  const [engaging, setEngaging] = useState<string | null>(null);
-  const [engagingLoading, setEngagingLoading] = useState(false);
-  const [engagingMeta, setEngagingMeta] = useState<{
-    provider: string;
-    model: string;
-  } | null>(null);
-  const [mode, setMode] = useState<"layout" | "raw" | "engaging">("layout");
+  const [mode, setMode] = useState<"layout" | "raw">("layout");
   const [showOriginal, setShowOriginal] = useState(true);
   const [zoom, setZoom] = useState(16);
   const [search, setSearch] = useState("");
@@ -120,8 +114,6 @@ export default function Home() {
     setFilePreviewUrl(URL.createObjectURL(f));
     setStatus(`Selected ${f.name} (${(f.size / 1024 / 1024).toFixed(2)} MB)`);
     setResult(null);
-    setEngaging(null);
-    setEngagingMeta(null);
     setMode("layout");
   }, [filePreviewUrl]);
 
@@ -130,7 +122,6 @@ export default function Home() {
     setUploading(true);
     setStatus("Uploading and extracting…");
     setResult(null);
-    setEngaging(null);
     try {
       const fd = new FormData();
       fd.append("file", file);
@@ -158,51 +149,10 @@ export default function Home() {
     }
   }, [file]);
 
-  const toggleEngaging = useCallback(async () => {
-    if (!result) return;
-    if (mode === "engaging") {
-      setMode(
-        result.result.pages.some((p) => p.render_png) ? "layout" : "raw"
-      );
-      return;
-    }
-    if (engaging) {
-      setMode("engaging");
-      return;
-    }
-    setEngagingLoading(true);
-    setStatus("Transforming to Engaging Mode…");
-    try {
-      const r = await fetch(`${API_BASE}/engaging`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ raw_markdown: result.raw_markdown }),
-      });
-      if (!r.ok) throw new Error(await r.text());
-      const data = (await r.json()) as {
-        engaging_markdown: string;
-        provider: string;
-        model: string;
-        sha256_input: string;
-      };
-      setEngaging(data.engaging_markdown);
-      setEngagingMeta({ provider: data.provider, model: data.model });
-      setMode("engaging");
-      setStatus(
-        `Engaging Mode rendered (provider: ${data.provider} / ${data.model}).`
-      );
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e);
-      setStatus(`Engaging Mode error: ${msg}`);
-    } finally {
-      setEngagingLoading(false);
-    }
-  }, [result, mode, engaging]);
-
   const currentMarkdown = useMemo(() => {
     if (!result) return "";
-    return mode === "engaging" && engaging ? engaging : result.raw_markdown;
-  }, [result, mode, engaging]);
+    return result.raw_markdown;
+  }, [result]);
 
   const renderedHtml = useMemo(() => {
     if (!result) return "";
@@ -395,8 +345,7 @@ export default function Home() {
             📄 PDF Extractor AI
           </h1>
           <p className="text-xs text-slate-500 mt-0.5">
-            Zero hallucinations. Every character preserved. Engaging Mode
-            reformats — never rewrites.
+            Zero hallucinations. Every character preserved.
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -511,17 +460,6 @@ export default function Home() {
                 >
                   📄 Raw MD
                 </button>
-                <button
-                  onClick={toggleEngaging}
-                  disabled={engagingLoading}
-                  className={`px-3 py-1.5 text-sm border-l border-slate-300 dark:border-slate-700 ${
-                    mode === "engaging"
-                      ? "bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900"
-                      : ""
-                  }`}
-                >
-                  {engagingLoading ? "✨ …" : "✨ Engaging"}
-                </button>
               </div>
               <button
                 onClick={() => setShowOriginal((v) => !v)}
@@ -587,7 +525,6 @@ export default function Home() {
                 onClick={() => {
                   setFile(null);
                   setResult(null);
-                  setEngaging(null);
                   setStatus("");
                 }}
                 className="ml-auto text-sm px-3 py-1.5 rounded-md border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800"
@@ -635,14 +572,6 @@ export default function Home() {
                     <li key={i}>{w}</li>
                   ))}
                 </ul>
-              </div>
-            )}
-
-            {engagingMeta && mode === "engaging" && (
-              <div className="mb-3 text-[11px] text-slate-500">
-                Engaging Mode rendered via{" "}
-                <code>{engagingMeta.provider}</code> / <code>{engagingMeta.model}</code>.
-                Content is format-only; every word matches Raw Mode.
               </div>
             )}
 

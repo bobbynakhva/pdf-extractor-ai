@@ -18,9 +18,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from .engaging import engaging_from_raw
 from .extractor import extract_pdf, result_to_raw_markdown
-from .models import EngagingRequest, EngagingResponse, ExtractionResult
+from .models import ExtractionResult
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("pdf-extractor")
@@ -33,11 +32,11 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="PDF Data Extraction & Engaging Mode API",
+    title="PDF Data Extraction API",
     description=(
         "Extracts text, tables, images, annotations, and metadata from PDFs "
-        "with a strict anti-hallucination policy. Offers an optional Engaging "
-        "Mode that reformats (but never alters) the extracted content."
+        "with a strict anti-hallucination policy. Renders pixel-perfect page "
+        "images and exports to editable DOCX."
     ),
     version="0.1.0",
     lifespan=lifespan,
@@ -70,7 +69,6 @@ def api_index() -> dict[str, object]:
         "name": "pdf-extractor-backend",
         "endpoints": [
             "POST /extract  (multipart: file=<pdf>)",
-            "POST /engaging (json: {raw_markdown})",
             "POST /download (json: {content, format, filename})",
             "GET  /render/{pdf_sha256}/{page}  (?dpi=N)",
             "GET  /export-docx/{pdf_sha256}  (?filename=name&engine=editable|layout)  — sync for small PDFs, 202+job for large",
@@ -897,23 +895,6 @@ def export_docx(
             "Cache-Control": "public, max-age=3600",
             "X-Docx-Engine": used,
         },
-    )
-
-
-@app.post("/engaging", response_model=EngagingResponse)
-def engaging(req: EngagingRequest) -> EngagingResponse:
-    if not req.raw_markdown.strip():
-        raise HTTPException(400, "raw_markdown is empty")
-    try:
-        out = engaging_from_raw(req.raw_markdown, req.model)
-    except Exception as exc:
-        log.exception("engaging mode failed")
-        raise HTTPException(500, f"Engaging mode failed: {exc}") from exc
-    return EngagingResponse(
-        engaging_markdown=out.engaging_markdown,
-        provider=out.provider,
-        model=out.model,
-        sha256_input=hashlib.sha256(req.raw_markdown.encode("utf-8")).hexdigest(),
     )
 
 

@@ -1,7 +1,7 @@
 # One-command deploy for running the whole app locally.
 #
 # Usage:
-#   cp .env.example .env        # fill in CLOD_API_KEY (optional)
+#   cp .env.example .env        # all entries are optional
 #   docker compose up -d
 #   open http://localhost:8000
 #
