@@ -533,37 +533,6 @@ export default function Home() {
               </button>
             </div>
 
-            {/* Confidence / integrity strip */}
-            <div className="mb-3 grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
-              <Badge
-                label="Pages"
-                value={String(result.result.page_count)}
-                tone="slate"
-              />
-              <Badge
-                label="Confidence"
-                value={`${Math.round(result.result.overall_confidence * 100)}%`}
-                tone={
-                  result.result.overall_confidence > 0.85
-                    ? "emerald"
-                    : result.result.overall_confidence > 0.6
-                    ? "amber"
-                    : "rose"
-                }
-              />
-              <Badge
-                label="Engines"
-                value={result.result.engines_used.join(" + ") || "none"}
-                tone="slate"
-              />
-              <Badge
-                label="SHA-256"
-                value={result.result.sha256.slice(0, 16) + "…"}
-                tone="slate"
-                mono
-              />
-            </div>
-
             {result.result.warnings.length > 0 && (
               <div className="mb-3 rounded-md border border-amber-300 bg-amber-50 dark:bg-amber-900/20 dark:border-amber-700 p-3 text-xs">
                 <strong>⚠️ Extraction flags</strong>
@@ -723,38 +692,4 @@ export default function Home() {
   );
 }
 
-function Badge({
-  label,
-  value,
-  tone,
-  mono,
-}: {
-  label: string;
-  value: string;
-  tone: "slate" | "emerald" | "amber" | "rose";
-  mono?: boolean;
-}) {
-  const tones: Record<string, string> = {
-    slate:
-      "bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200 border-slate-200 dark:border-slate-700",
-    emerald:
-      "bg-emerald-100 dark:bg-emerald-900/30 text-emerald-800 dark:text-emerald-200 border-emerald-200 dark:border-emerald-800",
-    amber:
-      "bg-amber-100 dark:bg-amber-900/30 text-amber-800 dark:text-amber-200 border-amber-200 dark:border-amber-800",
-    rose:
-      "bg-rose-100 dark:bg-rose-900/30 text-rose-800 dark:text-rose-200 border-rose-200 dark:border-rose-800",
-  };
-  return (
-    <div
-      className={`rounded-md border px-3 py-2 ${tones[tone]}`}
-      title={label}
-    >
-      <div className="text-[10px] uppercase tracking-wide opacity-70">
-        {label}
-      </div>
-      <div className={`font-semibold ${mono ? "font-mono text-xs" : "text-sm"}`}>
-        {value}
-      </div>
-    </div>
-  );
-}
+
