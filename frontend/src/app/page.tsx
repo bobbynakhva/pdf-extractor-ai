@@ -357,24 +357,20 @@ export default function Home() {
           if (js.state === "done") break;
         }
 
-        const dlRes = await fetch(
-          `${API_BASE}/export-docx/jobs/${jobId}/result?filename=${encodeURIComponent(base)}`
-        );
-        if (!dlRes.ok) {
-          const txt = await dlRes.text();
-          setStatus(`Word export failed: ${txt || dlRes.status}`);
-          return;
-        }
-        const blob = await dlRes.blob();
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
+        // Download via direct anchor click rather than fetch()+blob().
+        // For large DOCX files (>10 MB) the blob path can fail with
+        // "Failed to fetch" on memory-tight tabs or proxies that don't
+        // play well with JS-buffered downloads. The browser's native
+        // downloader handles streaming + Content-Disposition reliably.
         const suffix = engineMode === "layout" ? "-layout" : "";
+        const dlUrl = `${API_BASE}/export-docx/jobs/${jobId}/result?filename=${encodeURIComponent(base)}`;
+        const a = document.createElement("a");
+        a.href = dlUrl;
         a.download = `${base}${suffix}.docx`;
+        a.rel = "noopener";
         document.body.appendChild(a);
         a.click();
         a.remove();
-        URL.revokeObjectURL(url);
         setStatus(
           engineMode === "editable"
             ? `Saved ${base}.docx — text, tables and images are selectable and editable in Word or Google Docs.`
