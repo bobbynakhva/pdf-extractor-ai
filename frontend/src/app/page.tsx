@@ -91,7 +91,6 @@ export default function Home() {
   const [result, setResult] = useState<ExtractResponse | null>(null);
   const [mode, setMode] = useState<"layout" | "raw">("layout");
   const [showOriginal, setShowOriginal] = useState(true);
-  const [zoom, setZoom] = useState(16);
   const [search, setSearch] = useState("");
   const [dark, setDark] = useState(false);
   const outputRef = useRef<HTMLDivElement>(null);
@@ -349,16 +348,6 @@ export default function Home() {
           </p>
         </div>
         <div className="flex items-center gap-3">
-          <label className="flex items-center gap-2 text-xs">
-            <span className="text-slate-500">Zoom</span>
-            <input
-              type="range"
-              min={12}
-              max={24}
-              value={zoom}
-              onChange={(e) => setZoom(parseInt(e.target.value))}
-            />
-          </label>
           <button
             onClick={() => setDark((d) => !d)}
             className="text-xs px-3 py-1.5 rounded-md border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800"
@@ -678,7 +667,6 @@ export default function Home() {
                   <div className="p-6">
                     <div
                       className="prose-pdf"
-                      style={{ fontSize: `${zoom}px` }}
                       dangerouslySetInnerHTML={{ __html: renderedHtml }}
                     />
                   </div>
