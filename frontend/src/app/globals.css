@@ -1,0 +1,147 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Prose styling for rendered Markdown */
+.prose-pdf {
+  line-height: 1.6;
+}
+.prose-pdf h1,
+.prose-pdf h2,
+.prose-pdf h3,
+.prose-pdf h4 {
+  font-weight: 700;
+  margin-top: 1.4em;
+  margin-bottom: 0.6em;
+  line-height: 1.25;
+}
+.prose-pdf h1 {
+  font-size: 1.875rem;
+  border-bottom: 1px solid #e2e8f0;
+  padding-bottom: 0.25em;
+}
+.prose-pdf h2 {
+  font-size: 1.5rem;
+}
+.prose-pdf h3 {
+  font-size: 1.25rem;
+}
+.prose-pdf p {
+  margin: 0.6em 0;
+}
+.prose-pdf ul {
+  list-style: disc;
+  padding-left: 1.5em;
+  margin: 0.6em 0;
+}
+.prose-pdf ol {
+  list-style: decimal;
+  padding-left: 1.5em;
+  margin: 0.6em 0;
+}
+.prose-pdf a {
+  color: #2563eb;
+  text-decoration: underline;
+}
+.prose-pdf blockquote {
+  border-left: 4px solid #f59e0b;
+  background: #fef3c7;
+  padding: 0.5em 0.9em;
+  border-radius: 4px;
+  margin: 0.8em 0;
+  color: #78350f;
+}
+.dark .prose-pdf blockquote {
+  background: #78350f33;
+  color: #fde68a;
+}
+.prose-pdf table {
+  border-collapse: collapse;
+  margin: 0.8em 0;
+  width: 100%;
+}
+.prose-pdf th,
+.prose-pdf td {
+  border: 1px solid #cbd5e1;
+  padding: 0.35em 0.6em;
+  text-align: left;
+  vertical-align: top;
+}
+.prose-pdf th {
+  background: #f1f5f9;
+  font-weight: 600;
+}
+.dark .prose-pdf th {
+  background: #1e293b;
+}
+.prose-pdf code {
+  background: #f1f5f9;
+  padding: 0.1em 0.35em;
+  border-radius: 3px;
+  font-size: 0.9em;
+}
+.dark .prose-pdf code {
+  background: #1e293b;
+}
+.prose-pdf pre {
+  background: #0f172a;
+  color: #e2e8f0;
+  padding: 0.9em;
+  border-radius: 6px;
+  overflow-x: auto;
+}
+.prose-pdf img {
+  max-width: 100%;
+  height: auto;
+  margin: 0.6em 0;
+  border: 1px solid #e2e8f0;
+  border-radius: 4px;
+}
+
+.search-hit {
+  background-color: #fde68a;
+  color: #111;
+}
+
+/* PDF Layout view — positioned HTML from PyMuPDF. Each .pdf-page already
+   carries width/height in pt; browsers render pt at 96/72 px (readable).
+   We add vertical stacking, a white "paper" background, and shadow. */
+.pdf-doc {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 24px;
+  padding: 8px;
+  /* Pages are rendered at their natural 1 pt = 1.333 px scale. In a narrow
+     column the pages will overflow horizontally — the container scrolls. */
+}
+.pdf-page {
+  background: white;
+  color: #111;
+  box-shadow: 0 2px 16px rgba(0, 0, 0, 0.14);
+  border-radius: 2px;
+  overflow: hidden;
+  /* PyMuPDF html output positions elements in pt; keep raw scale 1:1 */
+}
+.dark .pdf-page {
+  /* Keep the page white — PDFs are designed for a white background, and the
+     PyMuPDF-emitted font colors assume a white page. Inverting breaks them. */
+  background: white;
+  color: #111;
+}
+.pdf-page p {
+  margin: 0;
+}
+.pdf-annot {
+  border-radius: 1px;
+}
+
+/* Hide scrollbar styling polish */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: #94a3b8;
+  border-radius: 4px;
+}
